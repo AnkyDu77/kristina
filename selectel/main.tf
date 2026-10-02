@@ -188,6 +188,10 @@ resource "local_file" "setup_script" {
   content  = <<-EOT
   #!/bin/bash
   set -euo pipefail
+  # Весь вывод — ещё и в файл: при сбое terraform показывает только
+  # «exited with status 1», а причину удобнее читать на самой машине
+  exec > >(tee -a /root/setup_kristina.log) 2>&1
+  echo "=== $(date -Is) setup start ==="
 
   AWS_ACCESS_KEY_ID="$1"
   AWS_SECRET_ACCESS_KEY="$2"
@@ -263,7 +267,8 @@ resource "local_file" "setup_script" {
       aws s3 cp "$key" - $S3 $Q | zstd -d | docker load
     else
       echo "=== $img — собираем (в кэше нет; lipsync — 20–40 минут) ==="
-      docker build -t "$img" "$svc/base"
+      # plain — чтобы при сбое в логе была сама ошибка, а не свёрнутый прогресс
+      docker build --progress=plain -t "$img" "$svc/base"
       if [ "$WRITE_CACHE" = "true" ]; then
         docker save "$img" | zstd -T0 -3 | aws s3 cp - "$key" $S3 $Q \
           || echo "!!! база $svc не уехала в кэш — в следующий раз соберётся заново"

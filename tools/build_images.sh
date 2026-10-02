@@ -67,7 +67,7 @@ for svc in ${SERVICES:-tts lipsync}; do
   fi
 
   echo "=== $img: сборка (lipsync — 20–40 минут) ==="
-  DOCKER_BUILDKIT=1 docker build -t "$img" "$MEDIA/$svc/base"
+  DOCKER_BUILDKIT=1 docker build --progress=plain -t "$img" "$MEDIA/$svc/base"
 
   echo "=== $img: проверка ==="
   "smoke_$svc" "$img"

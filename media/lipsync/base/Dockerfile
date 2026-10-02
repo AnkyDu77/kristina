@@ -30,6 +30,19 @@ RUN pip3 install --no-cache-dir -r requirements.txt \
  && pip3 install --no-cache-dir -U openmim \
  && mim install mmengine \
  && mim install "mmcv==2.0.1" \
- && mim install "mmdet==3.1.0" \
- && mim install "mmpose==1.1.0" \
- && pip3 install --no-cache-dir fastapi "uvicorn[standard]" python-multipart
+ && mim install "mmdet==3.1.0"
+
+# mmpose — без автозависимостей. Он объявляет chumpy (SMPL-модели тела),
+# а тот не собирается современным pip: его setup.py 2017 года импортирует
+# сам pip, которого в изолированном окружении сборки нет. В коде mmpose
+# 1.1.0 chumpy не импортируется ни разу (проверено по wheel) — так что
+# ставим остальные его зависимости руками. xtcocotools — версия с
+# готовым wheel под cp310, чтобы ничего не компилировать.
+RUN pip3 install --no-cache-dir --no-deps "mmpose==1.1.0" \
+ && pip3 install --no-cache-dir json-tricks munkres "xtcocotools==1.14.3"
+
+RUN pip3 install --no-cache-dir fastapi "uvicorn[standard]" python-multipart
+
+# Проверка ещё на сборке: всё ли ставится и импортируется. CUDA-части
+# (mmcv.ops и т.п.) тут не трогаем — при сборке нет видеокарты
+RUN python3 -c "import mmengine, mmcv, mmdet, mmpose, xtcocotools.mask, json_tricks, munkres, fastapi; print('mmcv', mmcv.__version__, 'mmpose', mmpose.__version__)"
