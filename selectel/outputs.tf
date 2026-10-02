@@ -7,6 +7,11 @@ output "media_endpoint" {
   value       = "http://${openstack_networking_floatingip_v2.floatingip.address}:${local.public_api_port}"
 }
 
+output "llm_base" {
+  description = "OpenAI-совместимый «мозг» на этой же GPU (пусто, если llm_enabled = false). Тот же Bearer-ключ, что у медиа-API"
+  value       = var.llm_enabled ? "http://${openstack_networking_floatingip_v2.floatingip.address}:${local.public_api_port}/llm/v1" : ""
+}
+
 output "kristina_vps_ip" {
   description = "Public VPS IP"
   value       = openstack_networking_floatingip_v2.floatingip.address

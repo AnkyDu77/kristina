@@ -7,6 +7,7 @@ locals {
   # проверяет Bearer-ключ и разводит запросы по префиксу пути
   tts_port        = 9001
   lipsync_port    = 9002
+  llm_port        = 1234 # REST API LM Studio (llmster), только localhost
   public_api_port = 8080
 
   root_dir    = "/opt/kristina"
@@ -262,7 +263,11 @@ resource "local_file" "setup_script" {
     local svc="$1" tag="$2"
     local img="kristina-$svc-base:$tag"
     local key="$CACHE/images/kristina-$svc-base-$tag.tar.zst"
-    if aws s3 ls "$key" $S3 > /dev/null 2>&1; then
+    if docker image inspect "$img" > /dev/null 2>&1; then
+      # Повторный apply на той же машине — база уже загружена, не тянем
+      # десять гигабайт из S3 заново
+      echo "=== $img — уже на машине ==="
+    elif aws s3 ls "$key" $S3 > /dev/null 2>&1; then
       echo "=== $img — из кэша ==="
       aws s3 cp "$key" - $S3 $Q | zstd -d | docker load
     else
@@ -288,6 +293,106 @@ resource "local_file" "setup_script" {
 
   echo "=== Starting services ==="
   docker compose up -d
+
+  if [ "${var.llm_enabled}" = "true" ]; then
+    echo "=== LLM: llmster (headless LM Studio) ==="
+    # Ставится на хост, а не в контейнер — ровно как в lmify, где эта
+    # схема проверена на этом же образе с драйвером 535
+    [ -x /root/.lmstudio/bin/lms ] || curl -fsSL https://lmstudio.ai/install.sh | bash
+    LMS=/root/.lmstudio/bin/lms
+
+    # Обёртка вместо прямого ExecStart (грабля lmify): установщик дописывает
+    # lms в фоне, и systemd ловил «Text file busy» — юнит падал насовсем,
+    # демон жил, а HTTP-сервера не было. Успех — только отвечающий порт.
+    cat > /usr/local/bin/kristina-lms-up <<'WRAP'
+  #!/bin/bash
+  set -uo pipefail
+  LMS=/root/.lmstudio/bin/lms
+  export HOME=/root
+  export PATH="/root/.lmstudio/bin:$PATH"
+  for i in $(seq 1 60); do "$LMS" version >/dev/null 2>&1 && break; sleep 2; done
+  "$LMS" daemon up  >/dev/null 2>&1 || true
+  "$LMS" server start >/dev/null 2>&1 || true
+  for i in $(seq 1 60); do
+    curl -fsS -m 3 http://127.0.0.1:${local.llm_port}/v1/models >/dev/null 2>&1 && exit 0
+    sleep 2
+    "$LMS" server start >/dev/null 2>&1 || true
+  done
+  echo "LM Studio server не поднялся за 2 минуты" >&2
+  exit 1
+  WRAP
+    chmod +x /usr/local/bin/kristina-lms-up
+
+    cat > /etc/systemd/system/lmstudio.service <<'UNIT'
+  [Unit]
+  Description=LM Studio Server (llmster) for Kristina
+  After=network-online.target
+  Wants=network-online.target
+
+  [Service]
+  Type=oneshot
+  RemainAfterExit=yes
+  User=root
+  Environment="HOME=/root"
+  TimeoutStartSec=360
+  ExecStart=/usr/local/bin/kristina-lms-up
+  ExecStop=/root/.lmstudio/bin/lms daemon down
+
+  [Install]
+  WantedBy=multi-user.target
+  UNIT
+
+    # Сторож: на прерываемой машине сервер может умереть и потом
+    cat > /etc/systemd/system/lmstudio-watchdog.service <<'UNIT'
+  [Unit]
+  Description=Check LM Studio API and restart it if dead
+
+  [Service]
+  Type=oneshot
+  ExecStart=/bin/bash -c 'curl -fsS -m 5 http://127.0.0.1:${local.llm_port}/v1/models >/dev/null || systemctl restart lmstudio.service'
+  UNIT
+    cat > /etc/systemd/system/lmstudio-watchdog.timer <<'UNIT'
+  [Unit]
+  Description=Check LM Studio API every minute
+
+  [Timer]
+  OnBootSec=2min
+  OnUnitActiveSec=1min
+  AccuracySec=10s
+
+  [Install]
+  WantedBy=timers.target
+  UNIT
+
+    systemctl daemon-reload
+    systemctl enable --now lmstudio.service
+    systemctl enable --now lmstudio-watchdog.timer
+
+    echo "=== LLM: ${var.llm_model_path} из S3 ==="
+    aws s3 sync "${var.llm_models_uri}/${var.llm_model_path}" "/root/.lmstudio/models/${var.llm_model_path}" $S3 $Q
+
+    # Любой вызов lms — с </dev/null и потолком времени: lms умеет
+    # спрашивать интерактивно, а ответить тут некому (грабля lmify)
+    run_lms() { local secs="$1"; shift; timeout "$secs" "$@" </dev/null; }
+
+    LLM_KEY="${var.llm_model_key}"
+    if [ -z "$LLM_KEY" ]; then
+      # Ключ LM Studio не равен имени папки — берём его у самого сервера,
+      # дав ему время проиндексировать свежесинканную модель
+      for i in $(seq 1 30); do
+        LLM_KEY=$(curl -fsS -m 5 http://127.0.0.1:${local.llm_port}/api/v0/models 2>/dev/null           | jq -r '[.data[] | select(.type == "llm")][0].id // empty')
+        [ -n "$LLM_KEY" ] && break
+        sleep 2
+      done
+    fi
+    [ -n "$LLM_KEY" ] || { echo "!!! LM Studio не видит ни одной LLM после синка ${var.llm_model_path}"; exit 1; }
+
+    echo "=== LLM: грузим $LLM_KEY в карту, контекст ${var.llm_context_length} ==="
+    run_lms ${var.llm_load_timeout_sec} $LMS load "$LLM_KEY" \
+      --context-length ${var.llm_context_length} --gpu max -y \
+      || { echo "!!! модель $LLM_KEY не загрузилась (мало VRAM? уменьши llm_context_length)"; exit 1; }
+    run_lms 60 $LMS ps || true
+  fi
 
   echo "=== Configuring nginx API gateway ==="
   : > /etc/nginx/kristina_api_keys.conf
@@ -331,6 +436,17 @@ resource "local_file" "setup_script" {
           }
           proxy_pass http://127.0.0.1:${local.lipsync_port}/;
       }
+
+      # «Мозг»: OpenAI-совместимый /llm/v1/* и нативный /llm/api/v0/* LM Studio
+      location /llm/ {
+          if ($kristina_auth_ok = 0) {
+              return 401 '{"error":"invalid or missing api key"}';
+          }
+          proxy_pass http://127.0.0.1:${local.llm_port}/;
+          proxy_http_version 1.1;
+          proxy_buffering off;
+          proxy_set_header Connection "";
+      }
   }
   NGINX
 
@@ -356,6 +472,11 @@ resource "local_file" "setup_script" {
     done
     echo "сервис на :$port готов"
   done
+  if [ "${var.llm_enabled}" = "true" ]; then
+    curl -fsS -m 5 http://127.0.0.1:${local.llm_port}/v1/models > /dev/null \
+      || { echo "!!! LLM на :${local.llm_port} не отвечает"; exit 1; }
+    echo "LLM на :${local.llm_port} готова"
+  fi
   nvidia-smi --query-gpu=memory.total,memory.used --format=csv
 
   if [ "$WRITE_CACHE" = "true" ]; then

@@ -172,3 +172,50 @@ variable "vps_flavor_id" {
   description = "VPS Specification ID (GPU-флейвор). Медиа-части хватает 16 GB VRAM, 24 GB — с запасом"
   type        = string
 }
+
+# ── «Мозг» на той же карте (llmster = headless LM Studio, как в lmify) ──
+
+variable "llm_enabled" {
+  description = "Поднимать ли LLM на этой же GPU. Выключи, если «мозг» живёт снаружи (lmify, API) — тогда задай KRISTINA_LLM_BASE боту"
+  type        = bool
+  default     = true
+}
+
+variable "llm_models_uri" {
+  description = "S3-префикс с GGUF-моделями в раскладке LM Studio (<publisher>/<model>/) — тот же бакет, что у lmify"
+  type        = string
+  default     = "s3://lmify-models/models"
+}
+
+variable "llm_model_path" {
+  description = <<-EOT
+    Какую модель синкать и грузить: "<publisher>/<model>" внутри
+    llm_models_uri. TTS + MuseTalk занимают ~17 GB VRAM, так что модель с
+    контекстом должна уместиться в остаток карты: gpt-oss-20b (~13 GB) на
+    48 GB — с большим запасом.
+  EOT
+  type        = string
+  default     = "lmstudio-community/gpt-oss-20b-GGUF"
+}
+
+variable "llm_model_key" {
+  description = <<-EOT
+    Ключ модели в LM Studio (как в /api/v0/models). Пусто = определить
+    самому после синка: ключ не совпадает с именем папки в S3, и гадать
+    его заранее — верный способ получить «model not found».
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "llm_context_length" {
+  description = "Контекст модели в токенах. Без явного значения LM Studio грузит модель с окном в пару тысяч — диалог с кодом туда не влезет"
+  type        = number
+  default     = 32768
+}
+
+variable "llm_load_timeout_sec" {
+  description = "Потолок на загрузку модели в карту. У lms бывают интерактивные вопросы, а stdin у remote-exec не терминал — без потолка apply висел бы часами"
+  type        = number
+  default     = 900
+}
