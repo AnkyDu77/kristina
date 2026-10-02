@@ -19,7 +19,11 @@ import (
 const designSample = "Привет! Я Кристина. Давай разберёмся с твоим кодом: рассказывай, что сломалось, что уже пробовал и чего хочешь добиться."
 
 type botConfig struct {
-	allowed      map[int64]bool
+	allowed map[int64]bool
+	// gpuAdmins — кто может будить и гасить видеокарту. Это прямые
+	// деньги, поэтому отдельный список: остальные из allowed говорят с
+	// Кристиной, только пока карту поднял кто-то из этих.
+	gpuAdmins    map[int64]bool
 	dataDir      string
 	avatarPath   string
 	language     string
@@ -27,6 +31,9 @@ type botConfig struct {
 	historyTurns int
 	circleSide   int
 	staticBase   string // медиа-API без terraform (машина поднята руками)
+	// llmBase — внешний «мозг» (lmify, API). Пусто — LLM живёт на той же
+	// GPU, что TTS и lip-sync: <медиа-API>/llm/v1 под тем же ключом.
+	llmBase string
 }
 
 type bot struct {
@@ -41,8 +48,15 @@ type bot struct {
 	waking bool // уже ждём подъёма машины — второй раз не будим
 }
 
+// incoming — сообщение в очереди чата: текст и кто его прислал (от этого
+// зависит, можно ли ему /wake и /sleep).
+type incoming struct {
+	from int64
+	text string
+}
+
 type chatState struct {
-	queue   chan string
+	queue   chan incoming
 	history []chatMsg
 	noCircl bool // /circles off — только текст (бережём GPU)
 }
@@ -81,7 +95,7 @@ func (b *bot) run(ctx context.Context) error {
 				log.Printf("bot: чужой tg_id %d (@%s) — игнор", m.From.ID, m.From.Username)
 				continue
 			}
-			b.enqueue(ctx, m.Chat.ID, m.Text)
+			b.enqueue(ctx, m.Chat.ID, incoming{from: m.From.ID, text: m.Text})
 		}
 	}
 	return ctx.Err()
@@ -89,27 +103,32 @@ func (b *bot) run(ctx context.Context) error {
 
 // enqueue — сообщения одного чата обрабатываются строго по очереди:
 // история диалога общая, и два ответа наперегонки её перемешали бы.
-func (b *bot) enqueue(ctx context.Context, chatID int64, text string) {
+func (b *bot) enqueue(ctx context.Context, chatID int64, in incoming) {
 	b.mu.Lock()
 	cs, ok := b.chats[chatID]
 	if !ok {
-		cs = &chatState{queue: make(chan string, 32)}
+		cs = &chatState{queue: make(chan incoming, 32)}
 		b.chats[chatID] = cs
 		go func() {
-			for t := range cs.queue {
-				b.handle(ctx, chatID, cs, t)
+			for in := range cs.queue {
+				b.handle(ctx, chatID, cs, in)
 			}
 		}()
 	}
 	b.mu.Unlock()
 	select {
-	case cs.queue <- text:
+	case cs.queue <- in:
 	default:
 		_ = b.tg.sendPlain(ctx, chatID, "Не успеваю — подожди, пока отвечу на предыдущие.")
 	}
 }
 
-func (b *bot) handle(ctx context.Context, chatID int64, cs *chatState, text string) {
+// errGPUAsleep — видеокарта спит, а будить её сообщениями нельзя: только
+// /wake от владельца.
+var errGPUAsleep = errors.New("видеокарта спит")
+
+func (b *bot) handle(ctx context.Context, chatID int64, cs *chatState, in incoming) {
+	text := in.text
 	cmd, arg, _ := strings.Cut(strings.TrimSpace(text), " ")
 	cmd = strings.SplitN(cmd, "@", 2)[0] // /status@kristina_bot в группах
 	arg = strings.TrimSpace(arg)
@@ -130,16 +149,27 @@ func (b *bot) handle(ctx context.Context, chatID int64, cs *chatState, text stri
 			state = "только текстом"
 		}
 		err = b.tg.sendPlain(ctx, chatID, "Отвечаю "+state+".")
-	case "/wake":
-		b.wake(ctx, chatID)
-	case "/sleep":
-		err = b.sleep(ctx, chatID)
+	case "/wake", "/sleep":
+		if !b.cfg.gpuAdmins[in.from] {
+			log.Printf("bot: %s от tg_id %d — не владелец, отказ", cmd, in.from)
+			err = b.tg.sendPlain(ctx, chatID, "Будить и гасить видеокарту может только владелец.")
+			break
+		}
+		if cmd == "/wake" {
+			b.wake(ctx, chatID)
+		} else {
+			err = b.sleep(ctx, chatID)
+		}
 	case "/design":
 		err = b.design(ctx, chatID, arg)
 	case "/keep":
 		err = b.keepVoice(ctx, chatID)
 	default:
 		err = b.answer(ctx, chatID, cs, text)
+	}
+	if errors.Is(err, errGPUAsleep) {
+		_ = b.tg.sendPlain(ctx, chatID, "Видеокарта спит — я пока не могу ни думать, ни говорить. Разбудить: /wake (только владелец).")
+		return
 	}
 	if err != nil && ctx.Err() == nil {
 		log.Printf("bot: chat %d: %v", chatID, err)
@@ -152,19 +182,33 @@ const helpText = `Привет! Я Кристина. Пиши — отвечу �
 /design <описание голоса> — подобрать мне голос (например: «молодая женщина, низкий спокойный тембр, говорит неторопливо»)
 /keep — оставить последний подобранный голос
 /circles on|off — отвечать кружками или только текстом
-/wake, /sleep — поднять или погасить видеокарту
+/wake, /sleep — разбудить или погасить видеокарту (только владелец; сама гаснет после простоя)
 /status — что с видеокартой и голосом
 /reset — забыть разговор`
 
 // ── Ответ ──────────────────────────────────────────────────────────────────
 
 func (b *bot) answer(ctx context.Context, chatID int64, cs *chatState, text string) error {
+	// «Мозг» на GPU — без неё не ответить вовсе. Машину держим занятой до
+	// конца ответа, чтобы watchdog не снёс её между LLM и кружком.
+	// Внешний «мозг» отвечает и без GPU — она нужна только для кружка.
+	gpuBase, release := "", func() {}
+	llmBase := b.cfg.llmBase
+	if llmBase == "" {
+		var err error
+		if gpuBase, release, err = b.requireGPU(ctx, chatID); err != nil {
+			return err
+		}
+		defer release()
+		llmBase = gpuBase + "/llm/v1"
+	}
+
 	stop := b.keepAction(ctx, chatID, "typing")
 	msgs := make([]chatMsg, 0, len(cs.history)+2)
 	msgs = append(msgs, chatMsg{Role: "system", Content: systemPrompt(b.cfg.maxSpeech)})
 	msgs = append(msgs, cs.history...)
 	msgs = append(msgs, chatMsg{Role: "user", Content: text})
-	raw, err := b.llm.complete(ctx, msgs)
+	raw, err := b.llm.complete(ctx, llmBase, msgs)
 	stop()
 	if err != nil {
 		return err
@@ -188,15 +232,18 @@ func (b *bot) answer(ctx context.Context, chatID int64, cs *chatState, text stri
 		return b.tg.sendPlain(ctx, chatID, "У меня пока нет голоса — подбери его через /design <описание>.")
 	}
 
-	base, release, ok := b.acquireGPU()
-	if !ok {
-		// Машина спит: отвечаем текстом сразу, а не через пять минут
-		// подъёма, и будим её — следующие ответы пойдут кружками
-		_ = b.sendText(ctx, chatID, r.Speech, r.Text)
-		b.wake(ctx, chatID)
-		return nil
+	base := gpuBase
+	if base == "" {
+		var ok bool
+		var rel func()
+		if base, rel, ok = b.acquireGPU(); !ok {
+			// Машина спит, а «мозг» внешний: отвечаем хотя бы текстом.
+			// Будить её сообщением нельзя — только /wake от владельца
+			_ = b.sendText(ctx, chatID, r.Speech, r.Text)
+			return b.tg.sendPlain(ctx, chatID, "Кружки — когда проснётся видеокарта (/wake).")
+		}
+		defer rel()
 	}
-	defer release()
 
 	stop = b.keepAction(ctx, chatID, "record_video_note")
 	mp4, err := b.circle(ctx, base, r.Speech, voice)
@@ -279,6 +326,28 @@ func (b *bot) acquireGPU() (base string, release func(), ok bool) {
 	return b.gpu.acquire()
 }
 
+// requireGPU занимает машину под запрос. Сама её не будит — это делает
+// только /wake от владельца. Но если машина уже просыпается, ждём:
+// сообщение, отправленное сразу после /wake, не должно получить «спит».
+func (b *bot) requireGPU(ctx context.Context, chatID int64) (string, func(), error) {
+	if base, release, ok := b.acquireGPU(); ok {
+		return base, release, nil
+	}
+	if b.gpu.status().State != "provisioning" {
+		return "", nil, errGPUAsleep
+	}
+	_ = b.tg.sendPlain(ctx, chatID, "Видеокарта просыпается — отвечу, как будет готова.")
+	wctx, cancel := context.WithTimeout(ctx, 90*time.Minute)
+	defer cancel()
+	if err := b.gpu.waitRunning(wctx); err != nil {
+		return "", nil, err
+	}
+	if base, release, ok := b.acquireGPU(); ok {
+		return base, release, nil
+	}
+	return "", nil, errGPUAsleep
+}
+
 // wake поднимает машину и сообщает в чат, когда она готова. Ждём в
 // фоне: очередь чата не должна стоять пять минут ради одного уведомления.
 func (b *bot) wake(ctx context.Context, chatID int64) {
@@ -301,7 +370,7 @@ func (b *bot) wake(ctx context.Context, chatID int64) {
 		_ = b.tg.sendPlain(ctx, chatID, "Видеокарта: "+err.Error())
 		return
 	}
-	_ = b.tg.sendPlain(ctx, chatID, "Бужу видеокарту — обычно это 5–10 минут (первый раз дольше: собираются образы). Дальше отвечу кружками.")
+	_ = b.tg.sendPlain(ctx, chatID, "Бужу видеокарту — обычно это 5–10 минут. Напишу, как проснётся; сообщения можно слать уже сейчас — дождутся.")
 
 	go func() {
 		defer func() {
@@ -347,6 +416,11 @@ func (b *bot) statusText(cs *chatState) string {
 			fmt.Fprintf(&sb, "  ошибка: %s\n", st.Err)
 		}
 	}
+	if b.cfg.llmBase == "" {
+		sb.WriteString("Мозг: на той же видеокарте\n")
+	} else {
+		fmt.Fprintf(&sb, "Мозг: %s\n", b.cfg.llmBase)
+	}
 	if _, err := b.loadVoice(); err != nil {
 		sb.WriteString("Голос: нет (/design)\n")
 	} else {
@@ -378,10 +452,9 @@ func (b *bot) design(ctx context.Context, chatID int64, instruct string) error {
 	if instruct == "" {
 		return b.tg.sendPlain(ctx, chatID, "Опиши голос: /design молодая женщина, низкий спокойный тембр, говорит неторопливо")
 	}
-	base, release, ok := b.acquireGPU()
-	if !ok {
-		b.wake(ctx, chatID)
-		return b.tg.sendPlain(ctx, chatID, "Голос подбирается на видеокарте — повтори /design, когда она проснётся.")
+	base, release, err := b.requireGPU(ctx, chatID)
+	if err != nil {
+		return err
 	}
 	defer release()
 

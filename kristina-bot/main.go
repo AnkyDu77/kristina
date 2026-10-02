@@ -23,17 +23,29 @@ func main() {
 	if len(allowed) == 0 {
 		log.Fatal("KRISTINA_ALLOWED_TGIDS: ни одного tg_id — бот личный, без списка он никому не ответит")
 	}
+	// Будить и гасить видеокарту — только им: это деньги
+	gpuAdmins := parseIDs(mustEnv("KRISTINA_GPU_ADMIN_TGIDS"))
+	for id := range gpuAdmins {
+		if !allowed[id] {
+			log.Fatalf("KRISTINA_GPU_ADMIN_TGIDS: tg_id %d нет в KRISTINA_ALLOWED_TGIDS — его сообщения бот не увидит вовсе", id)
+		}
+	}
 
-	llm := newLLMClient(
-		mustEnv("KRISTINA_LLM_BASE"),
-		os.Getenv("KRISTINA_LLM_KEY"),
-		mustEnv("KRISTINA_LLM_MODEL"),
-		envStr("KRISTINA_LLM_JSON_SCHEMA", "1") != "0",
-	)
-	media := newMediaClient(mustEnv("KRISTINA_MEDIA_KEY"))
+	mediaKey := mustEnv("KRISTINA_MEDIA_KEY")
+	media := newMediaClient(mediaKey)
+
+	// «Мозг»: по умолчанию — на той же GPU, под ключом медиа-API.
+	// KRISTINA_LLM_BASE — внешний эндпоинт со своим ключом.
+	llmBase := strings.TrimRight(os.Getenv("KRISTINA_LLM_BASE"), "/")
+	llmKey := mediaKey
+	if llmBase != "" {
+		llmKey = os.Getenv("KRISTINA_LLM_KEY")
+	}
+	llm := newLLMClient(llmKey, os.Getenv("KRISTINA_LLM_MODEL"), envStr("KRISTINA_LLM_JSON_SCHEMA", "1") != "0")
 
 	cfg := botConfig{
 		allowed:      allowed,
+		gpuAdmins:    gpuAdmins,
 		dataDir:      envStr("KRISTINA_DATA_DIR", "data"),
 		avatarPath:   envStr("KRISTINA_AVATAR", "../assets/idle.mp4"),
 		language:     envStr("KRISTINA_LANGUAGE", "Russian"),
@@ -41,6 +53,7 @@ func main() {
 		historyTurns: envInt("KRISTINA_HISTORY_TURNS", 12),
 		circleSide:   envInt("KRISTINA_CIRCLE_SIDE", 512),
 		staticBase:   strings.TrimRight(os.Getenv("KRISTINA_MEDIA_BASE"), "/"),
+		llmBase:      llmBase,
 	}
 	if _, err := os.Stat(cfg.avatarPath); err != nil {
 		log.Fatalf("KRISTINA_AVATAR: %v", err)
