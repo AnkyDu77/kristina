@@ -1,0 +1,16 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+crash.log
+
+# Секреты
+terraform.tfvars
+*.auto.tfvars
+.terraform.lock.hcl
+
+# Генерится терраформом при apply
+setup_kristina.sh
+
+.DS_Store

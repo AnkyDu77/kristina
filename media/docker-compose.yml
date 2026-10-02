@@ -1,0 +1,53 @@
+# Медиа-стек Кристины на GPU VPS. Порты — только на localhost: снаружи
+# в них ходят через nginx-гейт с Bearer-ключом (см. selectel/main.tf).
+#
+# Каждый сервис — тонкий образ поверх тяжёлой базы (<сервис>/base/).
+# Базы кэшируются в S3 по хэшу своего каталога; какие именно брать, пишет
+# в .env setup-скрипт терраформа. Тонкие образы собираются здесь же,
+# на машине, за секунды.
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  tts:
+    <<: *gpu
+    build:
+      context: ./tts
+      args:
+        BASE: ${KRISTINA_TTS_BASE:-kristina-tts-base:dev}
+    image: kristina-tts:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9001:9001"
+    environment:
+      HF_HOME: /weights/hf
+    volumes:
+      # qwen3-tts/ — веса из S3-кэша, hf/ — запасной HF-кэш
+      - ${KRISTINA_ROOT:-/opt/kristina}/weights:/weights
+
+  lipsync:
+    <<: *gpu
+    build:
+      context: ./lipsync
+      args:
+        BASE: ${KRISTINA_LIPSYNC_BASE:-kristina-lipsync-base:dev}
+    image: kristina-lipsync:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9002:9002"
+    environment:
+      # s3fd (детектор лица) torch.hub ищет здесь, а не в ~/.cache
+      # контейнера — иначе качал бы его заново после каждого пересоздания
+      TORCH_HOME: /app/MuseTalk/models/torch
+    volumes:
+      # MuseTalk ищет веса по относительному ./models от своего каталога
+      - ${KRISTINA_ROOT:-/opt/kristina}/weights/musetalk:/app/MuseTalk/models
+      # подготовленные аватары переживают рестарт контейнера
+      - ${KRISTINA_ROOT:-/opt/kristina}/cache/avatars:/cache/avatars

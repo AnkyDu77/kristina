@@ -1,0 +1,9 @@
+*.log
+.DS_Store
+.env
+
+
+# голос и прочее рабочее — в data/
+data/*
+!data/.gitkeep
+assets/*

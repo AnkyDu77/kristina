@@ -1,0 +1,39 @@
+# Скопируй в terraform.tfvars и заполни. terraform.tfvars в .gitignore — секреты не коммитим.
+# Аккаунт/проект/S3 можно брать те же, что у lmify.
+
+vps_name = "kristina-gpu"
+
+# --- Selectel ---
+selectel_account_id  = "123456"
+selectel_user_id     = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+selectel_username    = "terraform-admin"
+selectel_password    = "CHANGE_ME"
+selectel_project_id  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+selectel_auth_region = "ru-7"
+
+vps_availability_zone = "ru-7b"
+# GPU-флейвор смотри в панели Selectel. TTS (~5 GB) + MuseTalk (~5 GB)
+# укладываются в 16 GB VRAM; A30 24 GB из lmify — с запасом.
+vps_flavor_id     = "0000"
+boot_disk_type    = "fast.ru-7b"
+boot_disk_size_gb = 120
+
+# --- Доступ ---
+# ОБЯЗАТЕЛЬНО добавь IP машины с ботом — с неё terraform ходит по ssh.
+allowed_ssh_cidr     = ["1.2.3.4/32"]
+ssh_pub_key_path     = "~/.ssh/id_ed25519.pub"
+ssh_private_key_path = "~/.ssh/id_ed25519"
+
+# --- Медиа-API ---
+# Сузь до IP машины с ботом, когда он переедет на VPS
+allowed_api_cidr = ["0.0.0.0/0"]
+# openssl rand -hex 24; этот же ключ — KRISTINA_MEDIA_KEY в .env бота
+api_keys = ["CHANGE_ME"]
+
+# --- S3-кэш образов и весов ---
+s3_access_key    = "CHANGE_ME"
+s3_secret_key    = "CHANGE_ME"
+s3_endpoint_url  = "https://s3.ru-7.storage.selcloud.ru"
+s3_bucket_region = "ru-7"
+s3_cache_uri     = "s3://lmify-models/kristina-cache"  # тот же, что KRISTINA_S3_CACHE в tools/s3.env
+write_cache      = true

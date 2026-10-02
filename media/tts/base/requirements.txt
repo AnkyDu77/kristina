@@ -1,0 +1,6 @@
+qwen-tts
+fastapi
+uvicorn[standard]
+python-multipart
+soundfile
+numpy

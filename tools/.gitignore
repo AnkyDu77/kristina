@@ -1,0 +1,5 @@
+s3.env
+weights-staging/
+.venv-*/
+idle-loop/out/
+.DS_Store

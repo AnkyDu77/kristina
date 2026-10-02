@@ -1,0 +1,23 @@
+# Бот на дешёвой CPU-VPS. Весь проект kristina/ лежит на хосте в
+# /root/kristina: терраформу нужны и selectel/, и media/ (он заливает её
+# на GPU-машину), боту — assets/ с аватаром.
+services:
+  kristina-bot:
+    build:
+      context: .
+      args:
+        TF_VERSION: "1.14.3"
+    image: kristina-bot:latest
+    container_name: kristina-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # голос (data/voice) переживает пересоздание контейнера
+      - ./data:/app/kristina-bot/data
+      # terraform пишет tfstate прямо в selectel/ — rw
+      - /root/kristina/selectel:/app/selectel
+      - /root/kristina/media:/app/media:ro
+      - /root/kristina/assets:/app/assets:ro
+      # ssh-ключи для provisioner'ов (ssh_private_key_path в tfvars)
+      - /root/.ssh:/root/.ssh:ro
