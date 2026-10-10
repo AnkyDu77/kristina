@@ -336,6 +336,8 @@ func (b *bot) handle(ctx context.Context, chatID int64, cs *chatState, in incomi
 		err = b.watchesCmd(ctx, chatID)
 	case "/unwatch":
 		err = b.unwatchCmd(ctx, chatID, arg)
+	case "/gpu":
+		err = b.gpuCmd(ctx, chatID, arg)
 	case "/files":
 		err = b.filesCmd(ctx, chatID, arg)
 	case "/computer":
@@ -380,6 +382,7 @@ const helpText = `Привет! Я Кристина. Пиши — отвечу �
 /circle — сказать последний ответ кружком
 /circles on|off — кружки за крупные задачи: да или нет
 /wake, /sleep — разбудить или погасить видеокарту (только владелец; сама гаснет после простоя)
+/gpu — как там видеокарта (nvidia-smi); /gpu full — полный вывод
 /design <описание голоса> — подобрать мне голос; /keep — оставить его
 /status — что с видеокартой, памятью и очередью
 /reset — забыть разговор (память о тебе остаётся)`

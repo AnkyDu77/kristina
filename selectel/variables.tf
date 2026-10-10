@@ -212,7 +212,7 @@ variable "llm_model_key" {
 variable "llm_context_length" {
   description = "Контекст модели в токенах. Без явного значения LM Studio грузит модель с окном в пару тысяч — диалог с кодом туда не влезет"
   type        = number
-  default     = 32768
+  default     = 130000
 }
 
 variable "llm_load_timeout_sec" {

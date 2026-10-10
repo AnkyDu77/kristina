@@ -439,6 +439,44 @@ resource "local_file" "setup_script" {
       --viewport-size 1280x900
   fi
 
+  echo "=== GPU stats: снимок nvidia-smi для бота (/gpu/) ==="
+  # Раз в 5 секунд — в файлы, nginx их просто отдаёт. Бот спрашивает
+  # статистику, не занимая машину: его /gpu не продлевает ей жизнь
+  mkdir -p /var/lib/kristina-gpu
+  cat > /usr/local/bin/kristina-gpu-stats <<'STATS'
+  #!/bin/bash
+  D=/var/lib/kristina-gpu
+  Q=index,name,pstate,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,power.limit,clocks.sm
+  while true; do
+    nvidia-smi > $D/smi.txt.tmp 2>&1 && mv $D/smi.txt.tmp $D/smi.txt
+    nvidia-smi --query-gpu=$Q --format=csv,noheader,nounits > $D/gpu.csv.tmp 2>&1 && mv $D/gpu.csv.tmp $D/gpu.csv
+    # Процессы — с именем контейнера вместо безликого python3
+    nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits 2>/dev/null \
+      | while IFS=', ' read -r pid name mem; do
+          cid=$(grep -o 'docker-[0-9a-f]*' /proc/$pid/cgroup 2>/dev/null | head -1 | cut -c8-19)
+          [ -n "$cid" ] && name=$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null | tr -d /)
+          echo "$pid,$(basename "$name"),$mem"
+        done > $D/apps.csv.tmp && mv $D/apps.csv.tmp $D/apps.csv
+    sleep 5
+  done
+  STATS
+  chmod +x /usr/local/bin/kristina-gpu-stats
+  cat > /etc/systemd/system/kristina-gpu-stats.service <<'UNIT'
+  [Unit]
+  Description=Kristina: nvidia-smi snapshot for the bot
+  After=docker.service
+
+  [Service]
+  ExecStart=/usr/local/bin/kristina-gpu-stats
+  Restart=always
+
+  [Install]
+  WantedBy=multi-user.target
+  UNIT
+  systemctl daemon-reload
+  systemctl enable --now kristina-gpu-stats.service
+  systemctl restart kristina-gpu-stats.service
+
   echo "=== Configuring nginx API gateway ==="
   : > /etc/nginx/kristina_api_keys.conf
   chmod 600 /etc/nginx/kristina_api_keys.conf
@@ -480,6 +518,16 @@ resource "local_file" "setup_script" {
               return 401 '{"error":"invalid or missing api key"}';
           }
           proxy_pass http://127.0.0.1:${local.lipsync_port}/;
+      }
+
+      # Снимок nvidia-smi: /gpu/smi.txt, /gpu/gpu.csv, /gpu/apps.csv
+      location /gpu/ {
+          if ($kristina_auth_ok = 0) {
+              return 401 '{"error":"invalid or missing api key"}';
+          }
+          alias /var/lib/kristina-gpu/;
+          default_type text/plain;
+          add_header Cache-Control no-store;
       }
 
       # Браузер Кристины (Playwright MCP, Streamable HTTP): /browser/mcp
