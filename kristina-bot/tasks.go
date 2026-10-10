@@ -145,7 +145,7 @@ func (b *bot) execTask(ctx context.Context, t *task) error {
 			return err
 		}
 		t.Transcript = []chatMsg{
-			{Role: "system", Content: systemPrompt(mems, time.Now().In(b.cfg.tz), true)},
+			{Role: "system", Content: systemPrompt(mems, time.Now().In(b.cfg.tz), b.promptOpts(true))},
 			{Role: "user", Content: "Задача: " + t.Goal},
 		}
 	}
@@ -173,7 +173,8 @@ func (b *bot) execTask(ctx context.Context, t *task) error {
 			return nil
 		}
 		compactTranscript(t)
-		msgs, tools := t.Transcript, b.taskSpecs
+		b.ensureBrowser(ctx) // карта могла проснуться, пока задача ждала
+		msgs, tools := t.Transcript, b.specs(inTask)
 		last := t.Steps >= b.cfg.taskMaxSteps
 		if last {
 			tools = nil

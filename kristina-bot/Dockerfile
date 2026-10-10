@@ -13,8 +13,9 @@ FROM alpine:3.21
 ARG TF_VERSION=1.14.3
 ARG TARGETARCH=amd64
 
-# openssh-client — terraform ходит по ssh в provisioner'ах main.tf
-RUN apk add --no-cache ca-certificates openssh-client tzdata curl unzip \
+# openssh-client — terraform ходит по ssh в provisioner'ах main.tf;
+# docker-cli — бот поднимает песочницу Кристины (computer.go)
+RUN apk add --no-cache ca-certificates openssh-client tzdata curl unzip docker-cli \
  && curl -fsSL -o /tmp/tf.zip \
       "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_${TARGETARCH}.zip" \
  && unzip -q /tmp/tf.zip -d /usr/local/bin \

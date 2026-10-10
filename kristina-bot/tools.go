@@ -32,6 +32,9 @@ const (
 type tool struct {
 	spec  toolSpecFunc
 	modes int
+	// available — можно ли предлагать инструмент прямо сейчас (браузер
+	// живёт на GPU-машине: спит она — нет и браузера). nil — всегда.
+	available func() bool
 	// status — строка в сообщении о ходе работы («🔎 Ищу: …»)
 	status func(args json.RawMessage) string
 	// confirm != nil — у действия есть последствия, и перед run владелец
@@ -123,18 +126,47 @@ func (b *bot) buildTools() {
 	tools = append(tools, b.taskTools()...)
 	tools = append(tools, b.monitorTools()...)
 
-	b.tools = map[string]*tool{}
-	b.chatSpecs, b.taskSpecs = nil, nil
-	for _, t := range tools {
-		b.tools[t.spec.Name] = t
-		spec := toolSpec{Type: "function", Function: t.spec}
-		if t.modes&inChat != 0 {
-			b.chatSpecs = append(b.chatSpecs, spec)
+	b.registerTools(tools)
+}
+
+// registerTools добавляет инструменты или заменяет одноимённые. Реестр
+// меняется на ходу (браузер находится после подъёма карты), поэтому — под
+// замком.
+func (b *bot) registerTools(ts []*tool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.tools == nil {
+		b.tools = map[string]*tool{}
+	}
+	for _, t := range ts {
+		if _, ok := b.tools[t.spec.Name]; !ok {
+			b.toolOrder = append(b.toolOrder, t.spec.Name)
 		}
-		if t.modes&inTask != 0 {
-			b.taskSpecs = append(b.taskSpecs, spec)
+		b.tools[t.spec.Name] = t
+	}
+}
+
+func (b *bot) toolByName(name string) *tool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.tools[name]
+}
+
+// specs — что предложить модели в чате (inChat) или в задаче (inTask).
+func (b *bot) specs(mode int) []toolSpec {
+	b.mu.Lock()
+	ts := make([]*tool, 0, len(b.toolOrder))
+	for _, name := range b.toolOrder {
+		ts = append(ts, b.tools[name])
+	}
+	b.mu.Unlock()
+	var out []toolSpec
+	for _, t := range ts {
+		if t.modes&mode != 0 && (t.available == nil || t.available()) {
+			out = append(out, toolSpec{Type: "function", Function: t.spec})
 		}
 	}
+	return out
 }
 
 func (b *bot) toolSearch(ctx context.Context, chatID int64, a json.RawMessage) (string, error) {

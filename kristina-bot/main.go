@@ -73,6 +73,9 @@ func main() {
 		taskMaxSteps:    envInt("KRISTINA_TASK_MAX_STEPS", 25),
 		monitorDefault:  envDuration("KRISTINA_MONITOR_DEFAULT", time.Hour),
 		monitorMin:      envDuration("KRISTINA_MONITOR_MIN", 10*time.Minute),
+		browserEnabled:  envStr("KRISTINA_BROWSER", "1") != "0",
+		browserURL:      strings.TrimRight(os.Getenv("KRISTINA_BROWSER_URL"), "/"),
+		sandboxNetwork:  envStr("KRISTINA_SANDBOX_NETWORK", "none"),
 	}
 	if _, err := os.Stat(cfg.avatarPath); err != nil {
 		log.Fatalf("KRISTINA_AVATAR: %v", err)
@@ -125,6 +128,19 @@ func main() {
 	defer stop()
 
 	b := newBot(cfg, newTGAPI(token), llm, media, gpu, st)
+
+	// Компьютер: рабочая папка (всегда), песочница (если есть докер),
+	// внешние MCP-серверы (если заданы)
+	ws, err := openWorkspace(envStr("KRISTINA_WORKSPACE", filepath.Join(cfg.dataDir, "workspace")))
+	if err != nil {
+		log.Fatalf("KRISTINA_WORKSPACE: %v", err)
+	}
+	servers, err := parseMCPServers(os.Getenv("KRISTINA_MCP_SERVERS"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	b.attach(ws, sandboxFromEnv(ws.dir, cfg.sandboxNetwork), servers)
+
 	if err := b.run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatal(err)
 	}
@@ -187,6 +203,47 @@ func envInt(k string, def int) int {
 		log.Fatalf("%s: %v", k, err)
 	}
 	return n
+}
+
+// sandboxFromEnv — песочница, если докер доступен и образ собран.
+// KRISTINA_SANDBOX: auto (по умолчанию) | docker (обязательна) | off.
+func sandboxFromEnv(wsDir, network string) sandbox {
+	mode := envStr("KRISTINA_SANDBOX", "auto")
+	if mode == "off" {
+		log.Printf("sandbox: выключена (KRISTINA_SANDBOX=off)")
+		return nil
+	}
+	fail := func(format string, args ...any) sandbox {
+		if mode == "docker" {
+			log.Fatalf("sandbox: "+format, args...)
+		}
+		log.Printf("sandbox: нет — "+format+"; файлы при этом работают", args...)
+		return nil
+	}
+	bin, err := exec.LookPath(envStr("KRISTINA_DOCKER_BIN", "docker"))
+	if err != nil {
+		return fail("docker CLI не найден")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, bin, "info", "--format", "{{.ServerVersion}}").CombinedOutput(); err != nil {
+		return fail("докер не отвечает: %s", strings.TrimSpace(string(out)))
+	}
+	image := envStr("KRISTINA_SANDBOX_IMAGE", "kristina-sandbox:local")
+	if err := exec.CommandContext(ctx, bin, "image", "inspect", image).Run(); err != nil {
+		return fail("образа %s нет (docker compose --profile sandbox build sandbox)", image)
+	}
+	// Докер монтирует путь хоста. Бот в контейнере видит workspace по
+	// другому пути — тогда хостовый задаётся явно (docker-compose.yml)
+	hostDir := os.Getenv("KRISTINA_SANDBOX_HOST_DIR")
+	if hostDir == "" {
+		if hostDir, err = filepath.Abs(wsDir); err != nil {
+			return fail("%v", err)
+		}
+	}
+	log.Printf("sandbox: %s, сеть %s, workspace %s", image, network, hostDir)
+	return &dockerSandbox{bin: bin, image: image, hostDir: hostDir, network: network,
+		memory: envStr("KRISTINA_SANDBOX_MEMORY", "1g"), cpus: envStr("KRISTINA_SANDBOX_CPUS", "1")}
 }
 
 func envDuration(k string, def time.Duration) time.Duration {

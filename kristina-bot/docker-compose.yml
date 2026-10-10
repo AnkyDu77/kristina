@@ -13,12 +13,26 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # Песочница монтирует workspace по пути ХОСТА (бот видит его как
+      # /app/kristina-bot/data/workspace)
+      KRISTINA_SANDBOX_HOST_DIR: /root/kristina/kristina-bot/data/workspace
     volumes:
-      # голос (data/voice) переживает пересоздание контейнера
+      # голос, база и рабочая папка (data/workspace) переживают пересоздание контейнера
       - ./data:/app/kristina-bot/data
+      # бот поднимает песочницу Кристины. Сокет — это root на хосте, но
+      # он у бота, а не у модели: та может только «выполни в песочнице»
+      - /var/run/docker.sock:/var/run/docker.sock
       # terraform пишет tfstate прямо в selectel/ — rw
       - /root/kristina/selectel:/app/selectel
       - /root/kristina/media:/app/media:ro
       - /root/kristina/assets:/app/assets:ro
       # ssh-ключи для provisioner'ов (ssh_private_key_path в tfvars)
       - /root/.ssh:/root/.ssh:ro
+
+  # Образ песочницы — только собрать, запускает его сам бот:
+  #   docker compose --profile sandbox build sandbox
+  sandbox:
+    build: ./sandbox
+    image: kristina-sandbox:local
+    profiles: [sandbox]

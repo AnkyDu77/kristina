@@ -29,6 +29,30 @@ func fakeTG(t *testing.T) (*tgAPI, func() []tgSent) {
 	var nextID int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/file/"):
+			// скачивание присланного файла: содержимое = путь, чтобы тест его узнал
+			_, _ = w.Write([]byte("содержимое " + strings.TrimPrefix(r.URL.Path, "/file/botx/")))
+			return
+		case method == "getFile":
+			var p struct {
+				FileID string `json:"file_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&p)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"file_path": "docs/" + p.FileID}})
+			return
+		case method == "sendPhoto" || method == "sendDocument":
+			_ = r.ParseMultipartForm(1 << 20)
+			name := ""
+			for _, fh := range r.MultipartForm.File {
+				name = fh[0].Filename
+			}
+			mu.Lock()
+			sent = append(sent, tgSent{method: method, text: r.FormValue("caption") + "|" + name})
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"ok":true,"result":{}}`))
+			return
+		}
 		if method == "sendMessage" || method == "editMessageText" {
 			var p struct {
 				Text        string `json:"text"`

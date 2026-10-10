@@ -48,6 +48,13 @@ type botConfig struct {
 	// мониторы: интервал по умолчанию и минимальный (чаще — уже не
 	// «следить», а долбить чужой сайт)
 	monitorDefault, monitorMin time.Duration
+	// браузер (Playwright MCP) на GPU-машине; browserURL — свой адрес
+	// вместо <медиа-API>/browser/mcp
+	browserEnabled bool
+	browserURL     string
+	// сеть песочницы: none — без сети (по умолчанию); иначе каждая
+	// команда — с подтверждением
+	sandboxNetwork string
 }
 
 type bot struct {
@@ -60,10 +67,14 @@ type bot struct {
 	search *searchClient
 	fetch  *http.Client
 
-	tools     map[string]*tool
-	chatSpecs []toolSpec // что модель может вызвать в чате
-	taskSpecs []toolSpec // … и в фоновой задаче
+	tools     map[string]*tool // под mu: браузер и внешние MCP добавляются на ходу
+	toolOrder []string
 	tasks     *taskRunner
+
+	browser    browserState
+	sandbox    sandbox    // nil — докера нет, команд нет (файлы при этом работают)
+	ws         *workspace // nil — без рабочей папки
+	mcpServers []*mcpServer
 
 	mu      sync.Mutex
 	chats   map[int64]*chatState
@@ -81,6 +92,7 @@ type incoming struct {
 	from  int64
 	text  string
 	inbox bool
+	file  *tgFile // присланный документ или фото
 }
 
 type chatState struct {
@@ -110,9 +122,20 @@ func newBot(cfg botConfig, tg *tgAPI, llm *llmClient, media *mediaClient, gpu *g
 	b := &bot{cfg: cfg, tg: tg, llm: llm, media: media, gpu: gpu, store: st,
 		search: newSearchClient(), fetch: newFetchClient(),
 		chats: map[int64]*chatState{}, waiting: map[int64]chan bool{}, hintedPrivacy: map[int64]bool{}}
+	if b.cfg.sandboxNetwork == "" {
+		b.cfg.sandboxNetwork = "none"
+	}
 	b.tasks = newTaskRunner(b)
 	b.buildTools()
 	return b
+}
+
+// attach подключает компьютер: рабочую папку, песочницу, внешние
+// MCP-серверы — и их инструменты.
+func (b *bot) attach(ws *workspace, sb sandbox, servers []*mcpServer) {
+	b.ws, b.sandbox, b.mcpServers = ws, sb, servers
+	b.registerTools(b.fileTools())
+	b.registerTools(b.computerTools())
 }
 
 func (b *bot) run(ctx context.Context) error {
@@ -127,10 +150,15 @@ func (b *bot) run(ctx context.Context) error {
 
 	if b.gpu != nil {
 		b.gpu.setOnReady(func() {
+			b.ensureBrowser(ctx) // до ответов: пусть браузер уже будет в инструментах
 			b.drainInbox(ctx)
 			b.tasks.poke()
 		})
 	}
+	if len(b.mcpServers) > 0 {
+		go b.connectMCPServers(ctx)
+	}
+	b.ensureBrowser(ctx)
 	// Вопросы, отложенные прошлым процессом, — если думать уже есть чем
 	if b.brainReady() {
 		b.drainInbox(ctx)
@@ -160,7 +188,14 @@ func (b *bot) run(ctx context.Context) error {
 				continue
 			}
 			m := u.Message
-			if m == nil || m.From == nil || strings.TrimSpace(m.Text) == "" {
+			if m == nil || m.From == nil {
+				continue
+			}
+			text, file := m.Text, m.file()
+			if file != nil {
+				text = m.Caption
+			}
+			if strings.TrimSpace(text) == "" && file == nil {
 				continue
 			}
 			if !b.cfg.allowed[m.From.ID] {
@@ -169,10 +204,10 @@ func (b *bot) run(ctx context.Context) error {
 			}
 			// Реплай на вопрос задачи — ответ задаче, а не новый вопрос.
 			// Мимо очереди: её может занимать ответ на другое сообщение
-			if r := m.ReplyTo; r != nil && b.replyToTask(ctx, m.Chat.ID, r.MessageID, m.Text) {
+			if r := m.ReplyTo; r != nil && file == nil && b.replyToTask(ctx, m.Chat.ID, r.MessageID, text) {
 				continue
 			}
-			b.enqueue(ctx, m.Chat.ID, incoming{from: m.From.ID, text: m.Text})
+			b.enqueue(ctx, m.Chat.ID, incoming{from: m.From.ID, text: text, file: file})
 		}
 	}
 	return ctx.Err()
@@ -233,6 +268,26 @@ func (b *bot) handle(ctx context.Context, chatID int64, cs *chatState, in incomi
 		}
 		return
 	}
+	if in.file != nil {
+		// Файл — сначала в workspace (без видеокарты), а модель зовём,
+		// только если к нему есть просьба в подписи
+		note, err := b.upload(ctx, chatID, in.file)
+		if err != nil {
+			_ = b.tg.sendPlain(ctx, chatID, "Файл не приняла: "+err.Error())
+			return
+		}
+		if strings.TrimSpace(in.text) == "" {
+			_ = b.tg.sendPlain(ctx, chatID, "Сохранила: "+strings.TrimSuffix(strings.TrimPrefix(note, "[Владелец прислал файл: "), "]")+
+				". Напиши, что с ним сделать (или пришли файл с подписью — сразу возьмусь).")
+			return
+		}
+		in.text, in.file = note+"\n"+in.text, nil
+		if err := b.answer(ctx, chatID, cs, in); err != nil && ctx.Err() == nil {
+			log.Printf("bot: chat %d: %v", chatID, err)
+			_ = b.tg.sendPlain(ctx, chatID, "Ошибка: "+err.Error())
+		}
+		return
+	}
 	text := in.text
 	cmd, arg, _ := strings.Cut(strings.TrimSpace(text), " ")
 	cmd = strings.SplitN(cmd, "@", 2)[0] // /status@kristina_bot в группах
@@ -281,6 +336,10 @@ func (b *bot) handle(ctx context.Context, chatID int64, cs *chatState, in incomi
 		err = b.watchesCmd(ctx, chatID)
 	case "/unwatch":
 		err = b.unwatchCmd(ctx, chatID, arg)
+	case "/files":
+		err = b.filesCmd(ctx, chatID, arg)
+	case "/computer":
+		err = b.computerCmd(ctx, chatID, arg)
 	case "/wake", "/sleep":
 		if !b.cfg.gpuAdmins[in.from] {
 			log.Printf("bot: %s от tg_id %d — не владелец, отказ", cmd, in.from)
@@ -315,6 +374,7 @@ const helpText = `Привет! Я Кристина. Пиши — отвечу �
 
 /task <что сделать> — фоновая задача: план, вопросы к тебе, итог; /tasks — список
 /watch <адрес> — следить за страницей (без видеокарты); /watches, /unwatch <номер>
+Пришли файл (с подписью — что с ним сделать): он ляжет в мою рабочую папку. /files — что там лежит, /computer — моя песочница
 
 /memory — что я о тебе помню; /remember <факт> — запомнить; /forget <номер> — забыть
 /circle — сказать последний ответ кружком
@@ -355,7 +415,8 @@ func (b *bot) answer(ctx context.Context, chatID int64, cs *chatState, in incomi
 		return err
 	}
 	msgs := make([]chatMsg, 0, len(hist)+2)
-	msgs = append(msgs, chatMsg{Role: "system", Content: systemPrompt(mems, time.Now().In(b.cfg.tz), false)})
+	b.ensureBrowser(ctx)
+	msgs = append(msgs, chatMsg{Role: "system", Content: systemPrompt(mems, time.Now().In(b.cfg.tz), b.promptOpts(false))})
 	msgs = append(msgs, hist...)
 	msgs = append(msgs, chatMsg{Role: "user", Content: text})
 
@@ -802,6 +863,16 @@ func (b *bot) statusText(chatID int64, cs *chatState) string {
 		sb.WriteString("Мозг: на той же видеокарте\n")
 	} else {
 		fmt.Fprintf(&sb, "Мозг: %s\n", b.cfg.llmBase)
+	}
+	switch {
+	case !b.cfg.browserEnabled:
+	case b.browserReady():
+		sb.WriteString("Браузер: готов\n")
+	default:
+		sb.WriteString("Браузер: появится, когда проснётся видеокарта\n")
+	}
+	if b.sandbox != nil {
+		fmt.Fprintf(&sb, "Песочница: есть, сеть %s (/computer)\n", b.cfg.sandboxNetwork)
 	}
 	if n := b.store.countInbox(chatID); n > 0 {
 		fmt.Fprintf(&sb, "Отложено вопросов: %d\n", n)

@@ -67,7 +67,7 @@ func (b *bot) runAgent(ctx context.Context, chatID int64, msgs []chatMsg) (answe
 	budget := maxToolBudget
 	for turn := 0; ; turn++ {
 		last := turn >= b.cfg.maxSteps || budget <= 0
-		tools := b.chatSpecs
+		tools := b.specs(inChat)
 		if last {
 			tools = nil
 			if steps > 0 {
@@ -136,7 +136,7 @@ const rejectedResult = "Владелец не разрешил это дейст
 // второе значение — что сказать модели.
 func (b *bot) lookupTool(tc toolCall) (*tool, json.RawMessage, string) {
 	name := tc.Function.Name
-	t := b.tools[name]
+	t := b.toolByName(name)
 	if t == nil {
 		return nil, nil, "ошибка: инструмента " + name + " нет"
 	}

@@ -47,7 +47,37 @@ type tgMessage struct {
 	From      *tgUser            `json:"from"`
 	Chat      struct{ ID int64 } `json:"chat"`
 	Text      string             `json:"text"`
+	Caption   string             `json:"caption"`
 	ReplyTo   *tgMessage         `json:"reply_to_message"`
+	Document  *struct {
+		FileID   string `json:"file_id"`
+		FileName string `json:"file_name"`
+		FileSize int64  `json:"file_size"`
+	} `json:"document"`
+	// Photo — одно фото в нескольких размерах, крупнейший последний
+	Photo []struct {
+		FileID   string `json:"file_id"`
+		FileSize int64  `json:"file_size"`
+	} `json:"photo"`
+}
+
+// tgFile — присланный файл, сведённый к главному: документ или фото.
+type tgFile struct {
+	FileID string
+	Name   string
+	Size   int64
+}
+
+// file — что за файл в сообщении (nil — нет файла).
+func (m *tgMessage) file() *tgFile {
+	switch {
+	case m.Document != nil:
+		return &tgFile{FileID: m.Document.FileID, Name: m.Document.FileName, Size: m.Document.FileSize}
+	case len(m.Photo) > 0:
+		p := m.Photo[len(m.Photo)-1]
+		return &tgFile{FileID: p.FileID, Name: fmt.Sprintf("photo_%d.jpg", m.MessageID), Size: p.FileSize}
+	}
+	return nil
 }
 
 type tgUpdate struct {
@@ -232,6 +262,44 @@ func (a *tgAPI) sendVideo(ctx context.Context, chatID int64, mp4 []byte, side in
 		"supports_streaming": "true",
 		"caption":            caption,
 	})
+}
+
+func (a *tgAPI) sendPhoto(ctx context.Context, chatID int64, data []byte, caption string) error {
+	return a.sendFile(ctx, "sendPhoto", "photo", "screenshot.png", data, map[string]string{
+		"chat_id": fmt.Sprint(chatID),
+		"caption": caption,
+	})
+}
+
+func (a *tgAPI) sendDocument(ctx context.Context, chatID int64, name string, data []byte, caption string) error {
+	return a.sendFile(ctx, "sendDocument", "document", name, data, map[string]string{
+		"chat_id": fmt.Sprint(chatID),
+		"caption": caption,
+	})
+}
+
+// download скачивает присланный файл: getFile даёт путь, файл — по
+// отдельному адресу /file/bot<token>/<путь>. Bot API отдаёт до 20 МБ.
+func (a *tgAPI) download(ctx context.Context, fileID string) ([]byte, error) {
+	var f struct {
+		FilePath string `json:"file_path"`
+	}
+	if err := a.call(ctx, "getFile", map[string]any{"file_id": fileID}, &f); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/file/bot%s/%s", tgAPIBase, a.token, f.FilePath), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := a.files.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("getFile: %s", resp.Status)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 21<<20))
 }
 
 func (a *tgAPI) sendAudio(ctx context.Context, chatID int64, name string, data []byte, caption string) error {

@@ -8,7 +8,10 @@ locals {
   tts_port        = 9001
   lipsync_port    = 9002
   llm_port        = 1234 # REST API LM Studio (llmster), только localhost
+  browser_port    = 8931 # Playwright MCP (Chromium), только localhost
   public_api_port = 8080
+  # Своя docker-сеть браузера: из неё iptables пускает только в интернет
+  browser_subnet = "172.30.0.0/24"
 
   root_dir    = "/opt/kristina"
   media_src   = "${path.module}/../media"
@@ -394,6 +397,48 @@ resource "local_file" "setup_script" {
     run_lms 60 $LMS ps || true
   fi
 
+  if [ "${var.browser_enabled}" = "true" ]; then
+    echo "=== Browser: Playwright MCP (headless Chromium) ==="
+    # Образ — из S3-кэша, если он там есть (это и есть закреплённая версия:
+    # «latest» кэшируется один раз), иначе с mcr.microsoft.com
+    BIMG="${var.browser_image}"
+    BKEY="$CACHE/images/$(echo "$BIMG" | tr '/:@' '___').tar.zst"
+    if ! docker image inspect "$BIMG" > /dev/null 2>&1; then
+      if aws s3 ls "$BKEY" $S3 > /dev/null 2>&1; then
+        aws s3 cp "$BKEY" - $S3 $Q | zstd -d | docker load
+      else
+        docker pull "$BIMG"
+        if [ "$WRITE_CACHE" = "true" ]; then
+          docker save "$BIMG" | zstd -T0 -3 | aws s3 cp - "$BKEY" $S3 $Q \
+            || echo "!!! образ браузера не уехал в кэш"
+        fi
+      fi
+    fi
+
+    # Страницу открывает модель, а адрес ей может подсунуть сама страница.
+    # Поэтому из сети браузера — только в интернет: ни метаданных облака
+    # (169.254.169.254), ни приватных сетей, ни сервисов самой машины.
+    # Ответы на уже установленные соединения (в т.ч. от nginx) не трогаем.
+    docker network inspect kristina-browser > /dev/null 2>&1 \
+      || docker network create --subnet ${local.browser_subnet} kristina-browser
+    for dst in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 127.0.0.0/8; do
+      iptables -C DOCKER-USER -s ${local.browser_subnet} -d $dst -m conntrack --ctstate NEW -j DROP 2>/dev/null \
+        || iptables -I DOCKER-USER -s ${local.browser_subnet} -d $dst -m conntrack --ctstate NEW -j DROP
+    done
+    # Хост из контейнера — через INPUT, а не FORWARD: закрываем отдельно
+    iptables -C INPUT -s ${local.browser_subnet} -m conntrack --ctstate NEW -j DROP 2>/dev/null \
+      || iptables -I INPUT -s ${local.browser_subnet} -m conntrack --ctstate NEW -j DROP
+
+    docker rm -f kristina-browser > /dev/null 2>&1 || true
+    docker run -d --name kristina-browser --restart unless-stopped --init \
+      --network kristina-browser -p 127.0.0.1:${local.browser_port}:${local.browser_port} \
+      --shm-size 1g --memory 4g \
+      --entrypoint node "$BIMG" /app/cli.js \
+      --headless --browser chromium --no-sandbox --isolated --shared-browser-context \
+      --port ${local.browser_port} --host 0.0.0.0 --allowed-hosts '*' \
+      --viewport-size 1280x900
+  fi
+
   echo "=== Configuring nginx API gateway ==="
   : > /etc/nginx/kristina_api_keys.conf
   chmod 600 /etc/nginx/kristina_api_keys.conf
@@ -437,6 +482,19 @@ resource "local_file" "setup_script" {
           proxy_pass http://127.0.0.1:${local.lipsync_port}/;
       }
 
+      # Браузер Кристины (Playwright MCP, Streamable HTTP): /browser/mcp
+      location /browser/ {
+          if ($kristina_auth_ok = 0) {
+              return 401 '{"error":"invalid or missing api key"}';
+          }
+          proxy_pass http://127.0.0.1:${local.browser_port}/;
+          proxy_http_version 1.1;
+          proxy_buffering off;
+          proxy_set_header Connection "";
+          # Playwright сверяет Host; снаружи он — публичный IP машины
+          proxy_set_header Host localhost:${local.browser_port};
+      }
+
       # «Мозг»: OpenAI-совместимый /llm/v1/* и нативный /llm/api/v0/* LM Studio
       location /llm/ {
           if ($kristina_auth_ok = 0) {
@@ -472,6 +530,15 @@ resource "local_file" "setup_script" {
     done
     echo "сервис на :$port готов"
   done
+  if [ "${var.browser_enabled}" = "true" ]; then
+    # Не повод валить подъём: без браузера Кристина работает, просто без него
+    for i in $(seq 1 30); do
+      curl -s -m 3 -o /dev/null http://127.0.0.1:${local.browser_port}/mcp && { echo "браузер на :${local.browser_port} готов"; break; }
+      sleep 2
+    done || true
+    curl -s -m 3 -o /dev/null http://127.0.0.1:${local.browser_port}/mcp \
+      || { echo "!!! браузер не ответил"; docker logs --tail 40 kristina-browser || true; }
+  fi
   if [ "${var.llm_enabled}" = "true" ]; then
     curl -fsS -m 5 http://127.0.0.1:${local.llm_port}/v1/models > /dev/null \
       || { echo "!!! LLM на :${local.llm_port} не отвечает"; exit 1; }

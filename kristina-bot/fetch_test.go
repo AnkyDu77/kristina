@@ -73,11 +73,11 @@ func TestHTMLText(t *testing.T) {
 func TestSSEResponse(t *testing.T) {
 	stream := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n" +
 		"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n"
-	got, err := sseResponse(strings.NewReader(stream), 7)
+	got, err := sseResponse(strings.NewReader(stream), 7, 1<<20)
 	if err != nil || !strings.Contains(string(got), `"ok":true`) {
 		t.Fatalf("%s, %v", got, err)
 	}
-	if _, err := sseResponse(strings.NewReader(stream), 8); err == nil {
+	if _, err := sseResponse(strings.NewReader(stream), 8, 1<<20); err == nil {
 		t.Fatal("ответа на 8 в потоке нет")
 	}
 }

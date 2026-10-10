@@ -220,3 +220,22 @@ variable "llm_load_timeout_sec" {
   type        = number
   default     = 900
 }
+
+# ── Браузер Кристины (Playwright MCP) ──
+
+variable "browser_enabled" {
+  description = "Поднимать ли headless Chromium (Playwright MCP) на этой машине. Бот ходит в него через nginx: /browser/mcp"
+  type        = bool
+  default     = true
+}
+
+variable "browser_image" {
+  description = <<-EOT
+    Образ Playwright MCP. Первый подъём качает его с mcr.microsoft.com и
+    кладёт в S3-кэш; дальше берётся оттуда — так «latest» фактически
+    закрепляется. Обновить браузер = указать конкретный тег (или удалить
+    кэш images/mcr.microsoft.com_playwright_mcp_latest.tar.zst).
+  EOT
+  type        = string
+  default     = "mcr.microsoft.com/playwright/mcp:latest"
+}
