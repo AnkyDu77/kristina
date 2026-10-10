@@ -2,9 +2,8 @@ package main
 
 // gpuManager — жизненный цикл GPU VPS через terraform, урезанная копия
 // lmify-ui/gpu.go: одна машина (Кристина личная), без HTTP-панели.
-// Машина поднимается по первому сообщению, которому нужен кружок, и
-// гасится watchdog-ом после простоя — карта тикает по счёту, только
-// пока Кристина говорит.
+// Машину будит только владелец (/wake или кнопкой), гасит — watchdog
+// после простоя: карта тикает по счёту, только пока Кристина думает.
 
 import (
 	"bufio"
@@ -40,6 +39,14 @@ type gpuManager struct {
 	inFlight     int // запросы в полёте — watchdog их не прерывает
 	errMsg       string
 	tail         []string // последние строки terraform — для отчёта об ошибке
+	// onReady — машина поднялась: бот отвечает на отложенные вопросы
+	onReady func()
+}
+
+func (m *gpuManager) setOnReady(f func()) {
+	m.mu.Lock()
+	m.onReady = f
+	m.mu.Unlock()
 }
 
 func newGPUManager(tfBin, tfDir string, idle time.Duration) *gpuManager {
@@ -269,6 +276,9 @@ func (m *gpuManager) runOp(verb string) {
 		m.state, m.endpoint = "running", ep
 		m.since, m.lastActivity = time.Now(), time.Now()
 		log.Printf("gpu: VPS готова: %s", ep)
+		if m.onReady != nil {
+			go m.onReady()
+		}
 		return
 	}
 	m.state = "absent"

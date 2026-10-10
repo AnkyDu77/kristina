@@ -1,6 +1,7 @@
-// kristina-bot — Telegram-бот Кристины: сообщение → LLM → голос
-// (Qwen3-TTS) → кружок (MuseTalk) на GPU VPS, которую бот сам поднимает
-// терраформом и гасит по простою.
+// kristina-bot — Telegram-бот Кристины: сообщение → агент (LLM +
+// инструменты: поиск, чтение страниц, память) → ответ текстом, а итог
+// крупной задачи — кружком (Qwen3-TTS + MuseTalk). LLM и медиа живут на
+// GPU VPS, которую владелец будит, а бот гасит по простою.
 package main
 
 import (
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -41,7 +43,16 @@ func main() {
 	if llmBase != "" {
 		llmKey = os.Getenv("KRISTINA_LLM_KEY")
 	}
-	llm := newLLMClient(llmKey, os.Getenv("KRISTINA_LLM_MODEL"), envStr("KRISTINA_LLM_JSON_SCHEMA", "1") != "0")
+	llm := newLLMClient(llmKey, os.Getenv("KRISTINA_LLM_MODEL"))
+
+	tz, err := time.LoadLocation(envStr("KRISTINA_TZ", "Europe/Moscow"))
+	if err != nil {
+		log.Fatalf("KRISTINA_TZ: %v", err)
+	}
+	approvalTimeout, err := time.ParseDuration(envStr("KRISTINA_APPROVAL_TIMEOUT", "10m"))
+	if err != nil {
+		log.Fatalf("KRISTINA_APPROVAL_TIMEOUT: %v", err)
+	}
 
 	cfg := botConfig{
 		allowed:      allowed,
@@ -54,10 +65,33 @@ func main() {
 		circleSide:   envInt("KRISTINA_CIRCLE_SIDE", 512),
 		staticBase:   strings.TrimRight(os.Getenv("KRISTINA_MEDIA_BASE"), "/"),
 		llmBase:      llmBase,
+		maxSteps:     envInt("KRISTINA_AGENT_MAX_STEPS", 6),
+		// 0 — кружки только по /circle
+		circleMinTools:  envInt("KRISTINA_CIRCLE_MIN_TOOLS", 3),
+		approvalTimeout: approvalTimeout,
+		tz:              tz,
 	}
 	if _, err := os.Stat(cfg.avatarPath); err != nil {
 		log.Fatalf("KRISTINA_AVATAR: %v", err)
 	}
+
+	// История, память, подтверждения, отложенные вопросы. Рядом с голосом
+	// в data/ — тот же volume переживает пересоздание контейнера
+	dbPath := envStr("KRISTINA_DB", filepath.Join(cfg.dataDir, "kristina.db"))
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		log.Fatalf("KRISTINA_DB: %v", err)
+	}
+	st, err := openStore(dbPath)
+	if err != nil {
+		log.Fatalf("store %s: %v", dbPath, err)
+	}
+	defer st.db.Close()
+	if n, err := st.expirePending(); err != nil {
+		log.Fatalf("store: %v", err)
+	} else if n > 0 {
+		log.Printf("store: %d подтверждений прошлого процесса — просрочены", n)
+	}
+	log.Printf("store: %s", dbPath)
 
 	// Режим GPU: статический (машина поднята руками, адрес в
 	// KRISTINA_MEDIA_BASE) или managed (terraform по требованию)
@@ -82,7 +116,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	b := newBot(cfg, newTGAPI(token), llm, media, gpu)
+	b := newBot(cfg, newTGAPI(token), llm, media, gpu, st)
 	if err := b.run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatal(err)
 	}

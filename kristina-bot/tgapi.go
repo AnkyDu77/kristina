@@ -50,8 +50,23 @@ type tgMessage struct {
 }
 
 type tgUpdate struct {
-	UpdateID int64      `json:"update_id"`
-	Message  *tgMessage `json:"message"`
+	UpdateID      int64       `json:"update_id"`
+	Message       *tgMessage  `json:"message"`
+	CallbackQuery *tgCallback `json:"callback_query"`
+}
+
+// tgCallback — нажатие inline-кнопки.
+type tgCallback struct {
+	ID      string     `json:"id"`
+	From    *tgUser    `json:"from"`
+	Message *tgMessage `json:"message"`
+	Data    string     `json:"data"`
+}
+
+// tgButton — inline-кнопка; Data возвращается боту в callback_query.
+type tgButton struct {
+	Text string `json:"text"`
+	Data string `json:"callback_data"`
 }
 
 // call выполняет метод Bot API. 429 обрабатываем отдельно: телеграм сам
@@ -126,7 +141,7 @@ func (a *tgAPI) getUpdates(ctx context.Context, offset int64) ([]tgUpdate, error
 	err := a.call(ctx, "getUpdates", map[string]any{
 		"offset":          offset,
 		"timeout":         50,
-		"allowed_updates": []string{"message"},
+		"allowed_updates": []string{"message", "callback_query"},
 	}, &out)
 	return out, err
 }
@@ -159,6 +174,37 @@ func (a *tgAPI) sendPlain(ctx context.Context, chatID int64, text string) error 
 	return a.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text}, nil)
 }
 
+// sendButtons — сообщение без разметки с inline-кнопками (rows == nil —
+// без кнопок). Возвращает message_id: его потом переписывает editText.
+func (a *tgAPI) sendButtons(ctx context.Context, chatID int64, text string, rows [][]tgButton) (int64, error) {
+	p := map[string]any{"chat_id": chatID, "text": text}
+	if rows != nil {
+		p["reply_markup"] = map[string]any{"inline_keyboard": rows}
+	}
+	var m tgMessage
+	err := a.call(ctx, "sendMessage", p, &m)
+	return m.MessageID, err
+}
+
+// editText переписывает сообщение; rows == nil убирает кнопки.
+// «message is not modified» — не ошибка: текст уже такой.
+func (a *tgAPI) editText(ctx context.Context, chatID, msgID int64, text string, rows [][]tgButton) error {
+	p := map[string]any{"chat_id": chatID, "message_id": msgID, "text": text}
+	if rows != nil {
+		p["reply_markup"] = map[string]any{"inline_keyboard": rows}
+	}
+	err := a.call(ctx, "editMessageText", p, nil)
+	if err != nil && strings.Contains(err.Error(), "message is not modified") {
+		return nil
+	}
+	return err
+}
+
+// answerCallback гасит «часики» на нажатой кнопке; text — всплывашка.
+func (a *tgAPI) answerCallback(ctx context.Context, id, text string) {
+	_ = a.call(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": id, "text": text}, nil)
+}
+
 // chatAction показывает «печатает…» / «записывает видео…»; статус живёт
 // около 5 секунд, поэтому для долгих операций его надо повторять.
 func (a *tgAPI) chatAction(ctx context.Context, chatID int64, action string) {
@@ -171,6 +217,19 @@ func (a *tgAPI) sendVideoNote(ctx context.Context, chatID int64, mp4 []byte, sid
 	return a.sendFile(ctx, "sendVideoNote", "video_note", "kristina.mp4", mp4, map[string]string{
 		"chat_id": fmt.Sprint(chatID),
 		"length":  fmt.Sprint(side),
+	})
+}
+
+// sendVideo — обычное видео. Запасной путь для кружка: настройку
+// приватности «кто может присылать голосовые и видеосообщения» Telegram
+// применяет к кружкам, но не к обычным видео.
+func (a *tgAPI) sendVideo(ctx context.Context, chatID int64, mp4 []byte, side int, caption string) error {
+	return a.sendFile(ctx, "sendVideo", "video", "kristina.mp4", mp4, map[string]string{
+		"chat_id":            fmt.Sprint(chatID),
+		"width":              fmt.Sprint(side),
+		"height":             fmt.Sprint(side),
+		"supports_streaming": "true",
+		"caption":            caption,
 	})
 }
 

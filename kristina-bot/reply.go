@@ -1,21 +1,13 @@
 package main
 
-// Разбор ответа модели на две части. Модель не обязана слушаться:
-// open-weight модели оборачивают JSON в ```json, добавляют <think>,
-// а иногда отвечают просто текстом. Всё это — не повод молчать:
-// из любого ответа достаём, что сказать вслух и что написать.
+// Чистка ответа модели: open-weight модели добавляют <think>, а для
+// кружка из письменного ответа надо сделать что-то произносимое.
 
 import (
-	"encoding/json"
 	"regexp"
 	"strings"
 	"unicode/utf8"
 )
-
-type reply struct {
-	Speech string `json:"speech"`
-	Text   string `json:"text"`
-}
 
 var (
 	thinkRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
@@ -27,27 +19,6 @@ var (
 	spacesRe  = regexp.MustCompile(`\s+`)
 )
 
-func parseReply(raw string, maxSpeech int) reply {
-	s := stripThinking(raw)
-
-	var r reply
-	if !decodeReply(s, &r) {
-		// Не JSON — весь ответ пишем текстом, а вслух говорим его начало
-		r = reply{Text: s}
-	}
-	r.Speech = strings.TrimSpace(r.Speech)
-	r.Text = strings.TrimSpace(r.Text)
-	if r.Speech == "" {
-		r.Speech = speechFrom(r.Text)
-	}
-	r.Speech = clampSpeech(r.Speech, maxSpeech)
-	// Всё сказанное уместилось в кружок — дублировать текстом незачем
-	if r.Text == r.Speech {
-		r.Text = ""
-	}
-	return r
-}
-
 // stripThinking убирает рассуждения reasoning-моделей. Бывает и так, что
 // открывающий тег съел шаблон чата и в ответе остался только </think>.
 func stripThinking(s string) string {
@@ -56,23 +27,6 @@ func stripThinking(s string) string {
 		s = s[i+len("</think>"):]
 	}
 	return strings.TrimSpace(s)
-}
-
-func decodeReply(s string, r *reply) bool {
-	candidates := []string{s}
-	// ```json {...} ``` или JSON посреди болтовни — берём от первой {
-	// до последней }
-	if i, j := strings.Index(s, "{"), strings.LastIndex(s, "}"); i >= 0 && j > i {
-		candidates = append(candidates, s[i:j+1])
-	}
-	for _, c := range candidates {
-		var tmp reply
-		if json.Unmarshal([]byte(c), &tmp) == nil && (tmp.Speech != "" || tmp.Text != "") {
-			*r = tmp
-			return true
-		}
-	}
-	return false
 }
 
 // speechFrom делает из письменного текста что-то произносимое: без кода,
@@ -86,7 +40,7 @@ func speechFrom(text string) string {
 }
 
 // clampSpeech режет речь по границе предложения, не длиннее max рун.
-// Кружок дорог в рендере и ограничен минутой, поэтому лишнее — в text.
+// Кружок дорог в рендере и ограничен минутой.
 func clampSpeech(s string, max int) string {
 	if max <= 0 || utf8.RuneCountInString(s) <= max {
 		return s
@@ -102,4 +56,12 @@ func clampSpeech(s string, max int) string {
 		cut = cut[:i]
 	}
 	return strings.TrimSpace(cut) + "…"
+}
+
+// truncRunes — не длиннее n рун, с пометкой, что обрезано.
+func truncRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n]) + "…"
 }

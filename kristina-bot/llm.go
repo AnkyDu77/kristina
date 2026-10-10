@@ -3,7 +3,7 @@ package main
 // Клиент «мозга» — любой OpenAI-совместимый /v1/chat/completions:
 // llmster на GPU Кристины (по умолчанию), lmify, vLLM, облачный
 // провайдер open-weight моделей. Стриминг не нужен: ответ всё равно
-// сначала целиком уходит в TTS.
+// уходит в телеграм целиком.
 //
 // База передаётся в каждый вызов, а не задаётся раз и навсегда: у GPU,
 // поднятой терраформом, на каждом подъёме новый IP.
@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,33 @@ import (
 type chatMsg struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// ToolCalls — ход модели «вызвать инструменты» (role=assistant)
+	ToolCalls []toolCall `json:"tool_calls,omitempty"`
+	// ToolCallID — ответ инструмента на конкретный вызов (role=tool)
+	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+type toolCall struct {
+	ID       string   `json:"id"`
+	Type     string   `json:"type"`
+	Function toolFunc `json:"function"`
+}
+
+type toolFunc struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON строкой — так в протоколе OpenAI
+}
+
+// toolSpec — описание инструмента для модели.
+type toolSpec struct {
+	Type     string       `json:"type"`
+	Function toolSpecFunc `json:"function"`
+}
+
+type toolSpecFunc struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
 }
 
 type llmClient struct {
@@ -30,63 +58,37 @@ type llmClient struct {
 	// model — ключ модели. Пусто = спросить у сервера (discoverModel):
 	// ключ LM Studio не совпадает с именем папки в S3, гадать его не надо.
 	model string
-	// jsonSchema — просить у сервера structured output. Не все серверы и
-	// модели его умеют; на 400 откатываемся на обычный запрос, а формат
-	// держит промпт + терпимый разбор в parseReply.
-	jsonSchema bool
-	hc         *http.Client
+	hc    *http.Client
 
 	mu         sync.Mutex
 	discovered map[string]string // база → найденный ключ модели
 }
 
-func newLLMClient(key, model string, jsonSchema bool) *llmClient {
+func newLLMClient(key, model string) *llmClient {
 	return &llmClient{
-		key: key, model: model, jsonSchema: jsonSchema,
+		key: key, model: model,
 		hc:         &http.Client{Timeout: 5 * time.Minute},
 		discovered: map[string]string{},
 	}
 }
 
-// replySchema — то же, что описано в persona.go словами.
-var replySchema = map[string]any{
-	"type": "json_schema",
-	"json_schema": map[string]any{
-		"name":   "kristina_reply",
-		"strict": true,
-		"schema": map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"speech": map[string]any{"type": "string"},
-				"text":   map[string]any{"type": "string"},
-			},
-			"required":             []string{"speech", "text"},
-			"additionalProperties": false,
-		},
-	},
-}
-
-func (c *llmClient) complete(ctx context.Context, base string, msgs []chatMsg) (string, error) {
+// chat — один ход модели. tools == nil — инструменты не предлагаем
+// (речь для кружка, последний шаг агента): модель обязана ответить текстом.
+func (c *llmClient) chat(ctx context.Context, base string, msgs []chatMsg, tools []toolSpec) (chatMsg, error) {
 	base = strings.TrimRight(base, "/")
 	model, err := c.modelFor(ctx, base)
 	if err != nil {
-		return "", err
+		return chatMsg{}, err
 	}
 	body := map[string]any{
 		"model":       model,
 		"messages":    msgs,
 		"temperature": 0.7,
 	}
-	if c.jsonSchema {
-		body["response_format"] = replySchema
-		out, status, err := c.post(ctx, base, body)
-		if status != http.StatusBadRequest {
-			return out, err
-		}
-		delete(body, "response_format")
+	if len(tools) > 0 {
+		body["tools"] = tools
 	}
-	out, _, err := c.post(ctx, base, body)
-	return out, err
+	return c.post(ctx, base, body, len(tools) > 0)
 }
 
 // modelFor — заданная модель или найденная на сервере. Найденную
@@ -125,7 +127,8 @@ func (c *llmClient) discoverModel(ctx context.Context, base string) (string, err
 	if err := c.getJSON(ctx, strings.TrimSuffix(base, "/v1")+"/api/v0/models", &native); err == nil {
 		first := ""
 		for _, d := range native.Data {
-			if d.Type != "llm" {
+			// vlm — мультимодальная (Qwen3.6 с mmproj): для нас та же LLM
+			if d.Type != "llm" && d.Type != "vlm" {
 				continue
 			}
 			if d.State == "loaded" {
@@ -174,14 +177,14 @@ func (c *llmClient) getJSON(ctx context.Context, url string, out any) error {
 	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out)
 }
 
-func (c *llmClient) post(ctx context.Context, base string, body map[string]any) (string, int, error) {
+func (c *llmClient) post(ctx context.Context, base string, body map[string]any, withTools bool) (chatMsg, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return "", 0, err
+		return chatMsg{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {
-		return "", 0, err
+		return chatMsg{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.key != "" {
@@ -189,25 +192,70 @@ func (c *llmClient) post(ctx context.Context, base string, body map[string]any) 
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("LLM недоступна: %w", err)
+		return chatMsg{}, fmt.Errorf("LLM недоступна: %w", err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode != http.StatusOK {
-		return "", resp.StatusCode, fmt.Errorf("LLM %s: %s", resp.Status, strings.TrimSpace(string(data[:min(len(data), 300)])))
+		return chatMsg{}, fmt.Errorf("LLM %s: %s", resp.Status, strings.TrimSpace(string(data[:min(len(data), 300)])))
 	}
 	var parsed struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content   string     `json:"content"`
+				ToolCalls []toolCall `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		return "", resp.StatusCode, fmt.Errorf("LLM: битый ответ: %w", err)
+		return chatMsg{}, fmt.Errorf("LLM: битый ответ: %w", err)
 	}
 	if len(parsed.Choices) == 0 {
-		return "", resp.StatusCode, fmt.Errorf("LLM: пустой ответ")
+		return chatMsg{}, fmt.Errorf("LLM: пустой ответ")
 	}
-	return parsed.Choices[0].Message.Content, resp.StatusCode, nil
+	m := parsed.Choices[0].Message
+	out := chatMsg{Role: "assistant", Content: stripThinking(m.Content), ToolCalls: m.ToolCalls}
+	if len(out.ToolCalls) == 0 && withTools {
+		out.Content, out.ToolCalls = textToolCalls(out.Content)
+	}
+	for i := range out.ToolCalls {
+		if out.ToolCalls[i].ID == "" {
+			out.ToolCalls[i].ID = fmt.Sprintf("call_%d", i)
+		}
+		out.ToolCalls[i].Type = "function"
+	}
+	return out, nil
+}
+
+// toolCallRe — вызов инструмента, оставшийся текстом. Qwen пишет его
+// тегами <tool_call>{...}</tool_call>; если сервер не распознал их (не тот
+// шаблон чата, модель сбилась), вызов приходит в content, а не в tool_calls.
+var toolCallRe = regexp.MustCompile(`(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>`)
+
+// textToolCalls достаёт такие вызовы из текста и возвращает текст без них.
+func textToolCalls(content string) (string, []toolCall) {
+	var calls []toolCall
+	for _, m := range toolCallRe.FindAllStringSubmatch(content, -1) {
+		var c struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if json.Unmarshal([]byte(m[1]), &c) != nil || c.Name == "" {
+			continue
+		}
+		args := string(c.Arguments)
+		// arguments бывают и объектом, и уже строкой с JSON внутри
+		var s string
+		if json.Unmarshal(c.Arguments, &s) == nil {
+			args = s
+		}
+		if args == "" {
+			args = "{}"
+		}
+		calls = append(calls, toolCall{Function: toolFunc{Name: c.Name, Arguments: args}})
+	}
+	if len(calls) == 0 {
+		return content, nil
+	}
+	return strings.TrimSpace(toolCallRe.ReplaceAllString(content, "")), calls
 }

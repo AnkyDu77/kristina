@@ -27,7 +27,7 @@ func TestDiscoverModelPrefersLoadedLLM(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newLLMClient("k", "", true)
+	c := newLLMClient("k", "")
 	got, err := c.modelFor(context.Background(), srv.URL+"/llm/v1")
 	if err != nil || got != "openai/gpt-oss-20b" {
 		t.Fatalf("got %q, %v", got, err)
@@ -46,8 +46,22 @@ func TestDiscoverModelFallsBackToOpenAIList(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := newLLMClient("", "", true).modelFor(context.Background(), srv.URL+"/v1")
+	got, err := newLLMClient("", "").modelFor(context.Background(), srv.URL+"/v1")
 	if err != nil || got != "llama-3" {
 		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+func TestTextToolCalls(t *testing.T) {
+	content := "Сейчас поищу.\n<tool_call>\n{\"name\": \"web_search\", \"arguments\": {\"objective\": \"go\", \"search_queries\": [\"go release\"]}}\n</tool_call>"
+	rest, calls := textToolCalls(content)
+	if len(calls) != 1 || calls[0].Function.Name != "web_search" || rest != "Сейчас поищу." {
+		t.Fatalf("rest=%q calls=%+v", rest, calls)
+	}
+	if argStr(json.RawMessage(calls[0].Function.Arguments), "objective") != "go" {
+		t.Fatalf("аргументы: %s", calls[0].Function.Arguments)
+	}
+	if _, calls := textToolCalls("просто текст"); calls != nil {
+		t.Fatal("в обычном тексте вызовов нет")
 	}
 }

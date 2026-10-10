@@ -191,11 +191,12 @@ variable "llm_model_path" {
   description = <<-EOT
     Какую модель синкать и грузить: "<publisher>/<model>" внутри
     llm_models_uri. TTS + MuseTalk занимают ~17 GB VRAM, так что модель с
-    контекстом должна уместиться в остаток карты: gpt-oss-20b (~13 GB) на
-    48 GB — с большим запасом.
+    контекстом должна уместиться в остаток карты: Qwen3.6-27B Q4_K_M
+    (~16.5 GB + mmproj ~0.9 GB + KV-кэш) на 48 GB помещается. Агенту нужен
+    уверенный вызов инструментов — gpt-oss-20b с этим справляется хуже.
   EOT
   type        = string
-  default     = "lmstudio-community/gpt-oss-20b-GGUF"
+  default     = "lmstudio-community/Qwen3.6-27B-GGUF"
 }
 
 variable "llm_model_key" {

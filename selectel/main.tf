@@ -380,7 +380,7 @@ resource "local_file" "setup_script" {
       # Ключ LM Studio не равен имени папки — берём его у самого сервера,
       # дав ему время проиндексировать свежесинканную модель
       for i in $(seq 1 30); do
-        LLM_KEY=$(curl -fsS -m 5 http://127.0.0.1:${local.llm_port}/api/v0/models 2>/dev/null           | jq -r '[.data[] | select(.type == "llm")][0].id // empty')
+        LLM_KEY=$(curl -fsS -m 5 http://127.0.0.1:${local.llm_port}/api/v0/models 2>/dev/null           | jq -r '[.data[] | select(.type == "llm" or .type == "vlm")][0].id // empty')
         [ -n "$LLM_KEY" ] && break
         sleep 2
       done
