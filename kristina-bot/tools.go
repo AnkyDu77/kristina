@@ -22,8 +22,16 @@ const (
 	maxExcerpt    = 1500
 )
 
+// Где инструмент предлагается модели: в чате, в фоновой задаче или там и там.
+const (
+	inChat = 1 << iota
+	inTask
+	everywhere = inChat | inTask
+)
+
 type tool struct {
-	spec toolSpecFunc
+	spec  toolSpecFunc
+	modes int
 	// status — строка в сообщении о ходе работы («🔎 Ищу: …»)
 	status func(args json.RawMessage) string
 	// confirm != nil — у действия есть последствия, и перед run владелец
@@ -44,6 +52,7 @@ func (b *bot) buildTools() {
 					"search_queries": map[string]any{"type": "array", "items": str(""), "minItems": 1, "maxItems": 5, "description": "короткие поисковые запросы"},
 				}, "objective", "search_queries"),
 			},
+			modes:  everywhere,
 			status: func(a json.RawMessage) string { return "🔎 Ищу: " + argStr(a, "objective") },
 			run:    b.toolSearch,
 		},
@@ -56,6 +65,7 @@ func (b *bot) buildTools() {
 					"objective": str("что ищем на странице"),
 				}, "url"),
 			},
+			modes:  everywhere,
 			status: func(a json.RawMessage) string { return "📄 Читаю: " + argStr(a, "url") },
 			run:    b.toolReadPage,
 		},
@@ -65,6 +75,7 @@ func (b *bot) buildTools() {
 				Description: "Запомнить устойчивый факт о владельце или его предпочтение. Владелец подтверждает кнопкой.",
 				Parameters:  object(map[string]any{"text": str("что запомнить, одной фразой от третьего лица")}, "text"),
 			},
+			modes: everywhere,
 			confirm: func(_ int64, a json.RawMessage) (string, error) {
 				text := strings.TrimSpace(argStr(a, "text"))
 				if text == "" {
@@ -86,6 +97,7 @@ func (b *bot) buildTools() {
 				Description: "Забыть запись из памяти по номеру (#N из системного промпта). Владелец подтверждает кнопкой.",
 				Parameters:  object(map[string]any{"id": map[string]any{"type": "integer", "description": "номер записи"}}, "id"),
 			},
+			modes: everywhere,
 			confirm: func(chatID int64, a json.RawMessage) (string, error) {
 				m, ok, err := b.store.memory(chatID, argInt(a, "id"))
 				if err != nil {
@@ -108,11 +120,20 @@ func (b *bot) buildTools() {
 			},
 		},
 	}
+	tools = append(tools, b.taskTools()...)
+	tools = append(tools, b.monitorTools()...)
+
 	b.tools = map[string]*tool{}
-	b.toolSpecs = nil
+	b.chatSpecs, b.taskSpecs = nil, nil
 	for _, t := range tools {
 		b.tools[t.spec.Name] = t
-		b.toolSpecs = append(b.toolSpecs, toolSpec{Type: "function", Function: t.spec})
+		spec := toolSpec{Type: "function", Function: t.spec}
+		if t.modes&inChat != 0 {
+			b.chatSpecs = append(b.chatSpecs, spec)
+		}
+		if t.modes&inTask != 0 {
+			b.taskSpecs = append(b.taskSpecs, spec)
+		}
 	}
 }
 

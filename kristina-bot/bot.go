@@ -43,6 +43,11 @@ type botConfig struct {
 	circleMinTools  int
 	approvalTimeout time.Duration
 	tz              *time.Location
+	// taskMaxSteps — потолок вызовов инструментов у фоновой задачи
+	taskMaxSteps int
+	// мониторы: интервал по умолчанию и минимальный (чаще — уже не
+	// «следить», а долбить чужой сайт)
+	monitorDefault, monitorMin time.Duration
 }
 
 type bot struct {
@@ -56,7 +61,9 @@ type bot struct {
 	fetch  *http.Client
 
 	tools     map[string]*tool
-	toolSpecs []toolSpec
+	chatSpecs []toolSpec // что модель может вызвать в чате
+	taskSpecs []toolSpec // … и в фоновой задаче
+	tasks     *taskRunner
 
 	mu      sync.Mutex
 	chats   map[int64]*chatState
@@ -91,9 +98,19 @@ func newBot(cfg botConfig, tg *tgAPI, llm *llmClient, media *mediaClient, gpu *g
 	if cfg.tz == nil {
 		cfg.tz = time.Local
 	}
+	if cfg.taskMaxSteps <= 0 {
+		cfg.taskMaxSteps = 25
+	}
+	if cfg.monitorDefault <= 0 {
+		cfg.monitorDefault = time.Hour
+	}
+	if cfg.monitorMin <= 0 {
+		cfg.monitorMin = 10 * time.Minute
+	}
 	b := &bot{cfg: cfg, tg: tg, llm: llm, media: media, gpu: gpu, store: st,
 		search: newSearchClient(), fetch: newFetchClient(),
 		chats: map[int64]*chatState{}, waiting: map[int64]chan bool{}, hintedPrivacy: map[int64]bool{}}
+	b.tasks = newTaskRunner(b)
 	b.buildTools()
 	return b
 }
@@ -109,12 +126,17 @@ func (b *bot) run(ctx context.Context) error {
 	log.Printf("bot: @%s слушает", me.Username)
 
 	if b.gpu != nil {
-		b.gpu.setOnReady(func() { b.drainInbox(ctx) })
+		b.gpu.setOnReady(func() {
+			b.drainInbox(ctx)
+			b.tasks.poke()
+		})
 	}
 	// Вопросы, отложенные прошлым процессом, — если думать уже есть чем
 	if b.brainReady() {
 		b.drainInbox(ctx)
 	}
+	go b.tasks.loop(ctx)
+	go b.monitorLoop(ctx)
 
 	var offset int64
 	for ctx.Err() == nil {
@@ -143,6 +165,11 @@ func (b *bot) run(ctx context.Context) error {
 			}
 			if !b.cfg.allowed[m.From.ID] {
 				log.Printf("bot: чужой tg_id %d (@%s) — игнор", m.From.ID, m.From.Username)
+				continue
+			}
+			// Реплай на вопрос задачи — ответ задаче, а не новый вопрос.
+			// Мимо очереди: её может занимать ответ на другое сообщение
+			if r := m.ReplyTo; r != nil && b.replyToTask(ctx, m.Chat.ID, r.MessageID, m.Text) {
 				continue
 			}
 			b.enqueue(ctx, m.Chat.ID, incoming{from: m.From.ID, text: m.Text})
@@ -175,6 +202,25 @@ func (b *bot) enqueue(ctx context.Context, chatID int64, in incoming) {
 
 func circlesKey(chatID int64) string { return "circles:" + strconv.FormatInt(chatID, 10) }
 
+// replyToTask — если сообщение отвечает на вопрос задачи, передаёт ответ
+// ей; false — это обычный реплай.
+func (b *bot) replyToTask(ctx context.Context, chatID, replyTo int64, text string) bool {
+	t, err := b.store.taskByAskMsg(chatID, replyTo)
+	if err != nil || t == nil {
+		return false
+	}
+	ok, err := b.answerTaskInput(ctx, t, strings.TrimSpace(text))
+	switch {
+	case err != nil:
+		_ = b.tg.sendPlain(ctx, chatID, "Ошибка: "+err.Error())
+	case ok:
+		_ = b.tg.sendPlain(ctx, chatID, fmt.Sprintf("Передала в задачу #%d.", t.ID))
+	default:
+		_ = b.tg.sendPlain(ctx, chatID, fmt.Sprintf("Задача #%d уже не ждёт этого ответа.", t.ID))
+	}
+	return true
+}
+
 // errGPUAsleep — видеокарта спит, а будить её сообщениями нельзя: только
 // владелец, командой или кнопкой.
 var errGPUAsleep = errors.New("видеокарта спит")
@@ -193,7 +239,7 @@ func (b *bot) handle(ctx context.Context, chatID int64, cs *chatState, in incomi
 	arg = strings.TrimSpace(arg)
 
 	// Всё, кроме обычного сообщения, /circle и /design, работает без
-	// видеокарты — ради памяти, статуса и настроек её не будим
+	// видеокарты — ради памяти, задач, мониторов и настроек её не будим
 	var err error
 	switch cmd {
 	case "/start", "/help":
@@ -225,6 +271,16 @@ func (b *bot) handle(ctx context.Context, chatID int64, cs *chatState, in incomi
 		}
 	case "/circle":
 		err = b.circleCmd(ctx, chatID)
+	case "/task":
+		err = b.taskCmd(ctx, chatID, arg)
+	case "/tasks":
+		err = b.tasksCmd(ctx, chatID)
+	case "/watch":
+		err = b.watchCmd(ctx, chatID, arg)
+	case "/watches":
+		err = b.watchesCmd(ctx, chatID)
+	case "/unwatch":
+		err = b.unwatchCmd(ctx, chatID, arg)
 	case "/wake", "/sleep":
 		if !b.cfg.gpuAdmins[in.from] {
 			log.Printf("bot: %s от tg_id %d — не владелец, отказ", cmd, in.from)
@@ -253,9 +309,12 @@ func (b *bot) handle(ctx context.Context, chatID int64, cs *chatState, in incomi
 	}
 }
 
-const helpText = `Привет! Я Кристина. Пиши — отвечу текстом; если нужно, сама поищу в интернете и прочту страницы. Закончу крупную задачу — скажу итог кружком.
+const helpText = `Привет! Я Кристина. Пиши — отвечу текстом; если нужно, сама поищу в интернете и прочту страницы. Большое возьму фоновой задачей и пришлю итог — кружком.
 
 Пока видеокарта спит, я записываю вопросы и отвечаю на все разом, когда её разбудят: так дешевле.
+
+/task <что сделать> — фоновая задача: план, вопросы к тебе, итог; /tasks — список
+/watch <адрес> — следить за страницей (без видеокарты); /watches, /unwatch <номер>
 
 /memory — что я о тебе помню; /remember <факт> — запомнить; /forget <номер> — забыть
 /circle — сказать последний ответ кружком
@@ -296,7 +355,7 @@ func (b *bot) answer(ctx context.Context, chatID int64, cs *chatState, in incomi
 		return err
 	}
 	msgs := make([]chatMsg, 0, len(hist)+2)
-	msgs = append(msgs, chatMsg{Role: "system", Content: systemPrompt(mems, time.Now().In(b.cfg.tz))})
+	msgs = append(msgs, chatMsg{Role: "system", Content: systemPrompt(mems, time.Now().In(b.cfg.tz), false)})
 	msgs = append(msgs, hist...)
 	msgs = append(msgs, chatMsg{Role: "user", Content: text})
 
@@ -401,6 +460,30 @@ func (b *bot) onCallback(ctx context.Context, cq *tgCallback) {
 		_ = b.tg.editText(ctx, chatID, msgID, cq.Message.Text, nil) // кнопка своё отработала
 		b.wake(ctx, chatID)
 
+	case strings.HasPrefix(cq.Data, "task:"), strings.HasPrefix(cq.Data, "ans:"), strings.HasPrefix(cq.Data, "mon:"):
+		// <вид>:<id>:<что>
+		parts := strings.Split(cq.Data, ":")
+		id, ok := int64(0), len(parts) == 3
+		if ok {
+			id, ok = parseID(parts[1])
+		}
+		if !ok {
+			b.tg.answerCallback(ctx, cq.ID, "")
+			return
+		}
+		switch parts[0] {
+		case "task":
+			b.onTaskButton(ctx, cq, id, parts[2])
+		case "mon":
+			b.onMonitorButton(ctx, cq, id, parts[2])
+		case "ans":
+			idx, err := strconv.Atoi(parts[2])
+			if err != nil {
+				idx = -1
+			}
+			b.onAnswerButton(ctx, cq, id, idx)
+		}
+
 	case strings.HasPrefix(cq.Data, "act:"):
 		// act:<id>:ok|no
 		parts := strings.Split(cq.Data, ":")
@@ -430,6 +513,10 @@ func (b *bot) onCallback(ctx context.Context, cq *tgCallback) {
 		}
 		b.tg.answerCallback(ctx, cq.ID, "")
 		_ = b.tg.editText(ctx, chatID, msgID, mark+summary, nil)
+		if taskID, err := b.store.actionTask(id); err == nil && taskID != 0 {
+			b.resolveTaskApproval(ctx, taskID, id, status)
+			return
+		}
 		b.mu.Lock()
 		ch := b.waiting[id]
 		b.mu.Unlock()
@@ -718,6 +805,12 @@ func (b *bot) statusText(chatID int64, cs *chatState) string {
 	}
 	if n := b.store.countInbox(chatID); n > 0 {
 		fmt.Fprintf(&sb, "Отложено вопросов: %d\n", n)
+	}
+	if n := b.store.countQueued(); n > 0 {
+		fmt.Fprintf(&sb, "Задач в очереди: %d\n", n)
+	}
+	if ms, err := b.store.listMonitors(chatID); err == nil && len(ms) > 0 {
+		fmt.Fprintf(&sb, "Мониторов: %d\n", len(ms))
 	}
 	if mems, err := b.store.memories(chatID); err == nil {
 		fmt.Fprintf(&sb, "Памяти: %d записей\n", len(mems))

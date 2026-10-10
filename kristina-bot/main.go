@@ -70,6 +70,9 @@ func main() {
 		circleMinTools:  envInt("KRISTINA_CIRCLE_MIN_TOOLS", 3),
 		approvalTimeout: approvalTimeout,
 		tz:              tz,
+		taskMaxSteps:    envInt("KRISTINA_TASK_MAX_STEPS", 25),
+		monitorDefault:  envDuration("KRISTINA_MONITOR_DEFAULT", time.Hour),
+		monitorMin:      envDuration("KRISTINA_MONITOR_MIN", 10*time.Minute),
 	}
 	if _, err := os.Stat(cfg.avatarPath); err != nil {
 		log.Fatalf("KRISTINA_AVATAR: %v", err)
@@ -90,6 +93,11 @@ func main() {
 		log.Fatalf("store: %v", err)
 	} else if n > 0 {
 		log.Printf("store: %d подтверждений прошлого процесса — просрочены", n)
+	}
+	if n, err := st.requeueRunning(); err != nil {
+		log.Fatalf("store: %v", err)
+	} else if n > 0 {
+		log.Printf("store: %d задач прошлого процесса — продолжу с последнего шага", n)
 	}
 	log.Printf("store: %s", dbPath)
 
@@ -179,6 +187,18 @@ func envInt(k string, def int) int {
 		log.Fatalf("%s: %v", k, err)
 	}
 	return n
+}
+
+func envDuration(k string, def time.Duration) time.Duration {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Fatalf("%s: %v", k, err)
+	}
+	return d
 }
 
 func parseIDs(csv string) map[int64]bool {

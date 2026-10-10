@@ -145,7 +145,7 @@ func TestAgentSearchesThenAnswers(t *testing.T) {
 		t.Fatalf("вызовы MCP: %q", got)
 	}
 	r := reqs()
-	if len(r[0].Tools) != len(b.toolSpecs) || !strings.Contains(r[0].Messages[0].Content, "Сегодня") {
+	if len(r[0].Tools) != len(b.chatSpecs) || !strings.Contains(r[0].Messages[0].Content, "Сегодня") {
 		t.Fatalf("первый ход — с инструментами и датой в системном промпте")
 	}
 	all := strings.Join(texts(sent()), "\n---\n")

@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -102,5 +104,36 @@ func TestHistoryStartsWithUser(t *testing.T) {
 	_ = st.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&total)
 	if total != 4 {
 		t.Fatalf("soft delete: строк %d", total)
+	}
+}
+
+func TestMigrateFromPhase1DB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// actions — как их создала фаза 1: без task_id
+	if _, err := old.Exec(`CREATE TABLE actions (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL,
+		tool TEXT NOT NULL, args TEXT NOT NULL, summary TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+		result TEXT NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		decided_at TIMESTAMP, deleted_at TIMESTAMP);
+		INSERT INTO actions(chat_id, tool, args, summary) VALUES(100, 'remember', '{}', 'старое');`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	for i := 0; i < 2; i++ { // и повторное открытие уже обновлённой базы
+		st, err := openStore(path)
+		if err != nil {
+			t.Fatalf("открытие %d: %v", i, err)
+		}
+		if n, err := st.expirePending(); err != nil || (i == 0 && n != 1) {
+			t.Fatalf("старое подтверждение чата: n=%d, %v", n, err)
+		}
+		if _, err := st.createAction(100, 7, "remember", "{}", "из задачи"); err != nil {
+			t.Fatal(err)
+		}
+		st.db.Close()
 	}
 }

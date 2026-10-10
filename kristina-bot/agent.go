@@ -67,7 +67,7 @@ func (b *bot) runAgent(ctx context.Context, chatID int64, msgs []chatMsg) (answe
 	budget := maxToolBudget
 	for turn := 0; ; turn++ {
 		last := turn >= b.cfg.maxSteps || budget <= 0
-		tools := b.toolSpecs
+		tools := b.chatSpecs
 		if last {
 			tools = nil
 			if steps > 0 {
@@ -101,20 +101,12 @@ func (b *bot) runAgent(ctx context.Context, chatID int64, msgs []chatMsg) (answe
 	}
 }
 
-// callTool выполняет один вызов. Ошибки не роняют ответ, а уходят модели
-// текстом: пусть попробует иначе или честно скажет, что не вышло.
+// callTool выполняет один вызов в чате. Ошибки не роняют ответ, а уходят
+// модели текстом: пусть попробует иначе или честно скажет, что не вышло.
 func (b *bot) callTool(ctx context.Context, chatID int64, tc toolCall, prog *progress) string {
-	name := tc.Function.Name
-	t := b.tools[name]
+	t, args, bad := b.lookupTool(tc)
 	if t == nil {
-		return "ошибка: инструмента " + name + " нет"
-	}
-	args := json.RawMessage(tc.Function.Arguments)
-	if strings.TrimSpace(tc.Function.Arguments) == "" {
-		args = json.RawMessage("{}")
-	}
-	if !json.Valid(args) {
-		return "ошибка: аргументы — не JSON"
+		return bad
 	}
 	if t.status != nil {
 		prog.add(ctx, truncRunes(t.status(args), 120))
@@ -126,16 +118,41 @@ func (b *bot) callTool(ctx context.Context, chatID int64, tc toolCall, prog *pro
 		if err != nil {
 			return "ошибка: " + err.Error()
 		}
-		ok, id, err := b.approve(ctx, chatID, name, string(args), summary)
+		ok, id, err := b.approve(ctx, chatID, tc.Function.Name, string(args), summary)
 		if err != nil {
 			return "ошибка: " + err.Error()
 		}
 		if !ok {
-			return "Владелец не разрешил это действие (или не ответил). Не повторяй его без новой просьбы."
+			return rejectedResult
 		}
 		actionID = id
 	}
+	return b.execTool(ctx, chatID, t, tc.Function.Name, args, actionID)
+}
 
+const rejectedResult = "Владелец не разрешил это действие (или не ответил). Не повторяй его без новой просьбы."
+
+// lookupTool — инструмент и аргументы вызова; nil — вызов битый, и
+// второе значение — что сказать модели.
+func (b *bot) lookupTool(tc toolCall) (*tool, json.RawMessage, string) {
+	name := tc.Function.Name
+	t := b.tools[name]
+	if t == nil {
+		return nil, nil, "ошибка: инструмента " + name + " нет"
+	}
+	args := json.RawMessage(tc.Function.Arguments)
+	if strings.TrimSpace(tc.Function.Arguments) == "" {
+		args = json.RawMessage("{}")
+	}
+	if !json.Valid(args) {
+		return nil, nil, "ошибка: аргументы — не JSON"
+	}
+	return t, args, ""
+}
+
+// execTool запускает инструмент (подтверждение, если нужно, уже получено)
+// и пишет журнал и квитанцию.
+func (b *bot) execTool(ctx context.Context, chatID int64, t *tool, name string, args json.RawMessage, actionID int64) string {
 	start := time.Now()
 	rctx, cancel := context.WithTimeout(ctx, toolTimeout)
 	res, err := t.run(rctx, chatID, args)
@@ -158,7 +175,7 @@ func (b *bot) callTool(ctx context.Context, chatID int64, tc toolCall, prog *pro
 // approve спрашивает владельца кнопками и ждёт ответа. Решение принимает
 // onCallback (кнопка) или таймаут — кто первый: decideAction атомарен.
 func (b *bot) approve(ctx context.Context, chatID int64, tool, args, summary string) (ok bool, id int64, err error) {
-	id, err = b.store.createAction(chatID, tool, args, summary)
+	id, err = b.store.createAction(chatID, 0, tool, args, summary)
 	if err != nil {
 		return false, 0, err
 	}
@@ -172,10 +189,7 @@ func (b *bot) approve(ctx context.Context, chatID int64, tool, args, summary str
 		b.mu.Unlock()
 	}()
 
-	msgID, err := b.tg.sendButtons(ctx, chatID, approvalPrefix+summary, [][]tgButton{{
-		{Text: "✅ Да", Data: fmt.Sprintf("act:%d:ok", id)},
-		{Text: "❌ Нет", Data: fmt.Sprintf("act:%d:no", id)},
-	}})
+	msgID, err := b.tg.sendButtons(ctx, chatID, approvalPrefix+summary, approvalButtons(id))
 	if err != nil {
 		_, _ = b.store.decideAction(chatID, id, "expired")
 		return false, id, err
@@ -201,6 +215,13 @@ func (b *bot) approve(ctx context.Context, chatID int64, tool, args, summary str
 	}
 	_ = b.tg.editText(context.WithoutCancel(ctx), chatID, msgID, "⌛ Не дождалась ответа: "+summary, nil)
 	return false, id, nil
+}
+
+func approvalButtons(actionID int64) [][]tgButton {
+	return [][]tgButton{{
+		{Text: "✅ Да", Data: fmt.Sprintf("act:%d:ok", actionID)},
+		{Text: "❌ Нет", Data: fmt.Sprintf("act:%d:no", actionID)},
+	}}
 }
 
 // progress — одно сообщение о ходе работы, которое дописывается по шагам:

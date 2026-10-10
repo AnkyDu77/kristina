@@ -47,6 +47,7 @@ type tgMessage struct {
 	From      *tgUser            `json:"from"`
 	Chat      struct{ ID int64 } `json:"chat"`
 	Text      string             `json:"text"`
+	ReplyTo   *tgMessage         `json:"reply_to_message"`
 }
 
 type tgUpdate struct {

@@ -33,7 +33,22 @@ func openStore(path string) (*store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	// Колонки, появившиеся после первой выкатки: CREATE TABLE IF NOT
+	// EXISTS живую таблицу не трогает, поэтому — ALTER, а повтор на уже
+	// обновлённой базе даёт «duplicate column», это не ошибка
+	for _, m := range migrations {
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			db.Close()
+			return nil, fmt.Errorf("migrate %q: %w", m, err)
+		}
+	}
 	return &store{db: db}, nil
+}
+
+var migrations = []string{
+	// 0 — подтверждение из чата (агент ждёт его, блокируясь); иначе — из
+	// фоновой задачи, которая на это время припаркована в базе
+	`ALTER TABLE actions ADD COLUMN task_id INTEGER NOT NULL DEFAULT 0`,
 }
 
 const schema = `
@@ -102,6 +117,51 @@ CREATE TABLE IF NOT EXISTS inbox (
     deleted_at TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS inbox_pending ON inbox(chat_id) WHERE done_at IS NULL AND deleted_at IS NULL;
+
+-- Фоновые задачи. Ход агента (transcript) сохраняется после каждого шага:
+-- задача переживает рестарт бота и сон видеокарты и продолжает с того же
+-- места. Ждать ответа владельца она умеет, ничего не занимая: pending —
+-- припаркованный вызов инструмента, status = waiting.
+CREATE TABLE IF NOT EXISTS tasks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL,
+    goal        TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'queued', -- queued | running | waiting | paused | done | failed | cancelled
+    plan        TEXT NOT NULL DEFAULT '[]',
+    transcript  TEXT NOT NULL DEFAULT '[]',
+    steps       INTEGER NOT NULL DEFAULT 0,
+    note        TEXT NOT NULL DEFAULT '',       -- что делает прямо сейчас
+    pending     TEXT NOT NULL DEFAULT '',
+    result      TEXT NOT NULL DEFAULT '',
+    error       TEXT NOT NULL DEFAULT '',
+    card_msg_id INTEGER NOT NULL DEFAULT 0,     -- карточка задачи в чате
+    ask_msg_id  INTEGER NOT NULL DEFAULT 0,     -- вопрос владельцу (на него отвечают реплаем)
+    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at  TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status) WHERE deleted_at IS NULL;
+
+-- Мониторы страниц. Работают без LLM и без видеокарты: скачать, сравнить,
+-- написать. next_run_at — unix-секунды: со временем в modernc проще
+-- числом (грабля lmify с decltype).
+CREATE TABLE IF NOT EXISTS monitors (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL,
+    url         TEXT NOT NULL,
+    kind        TEXT NOT NULL,                  -- change | appears | disappears
+    pattern     TEXT NOT NULL DEFAULT '',
+    interval_s  INTEGER NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'active', -- active | paused
+    state       TEXT NOT NULL DEFAULT '',       -- хэш текста или 1/0 «текст на странице»
+    last_text   TEXT NOT NULL DEFAULT '',       -- для change: с чем сравнивать
+    last_alert  TEXT NOT NULL DEFAULT '',
+    fails       INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT NOT NULL DEFAULT '',
+    next_run_at INTEGER NOT NULL DEFAULT 0,
+    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at  TIMESTAMP
+);
 
 -- Настройки чатов и прочие мелочи (кружки вкл/выкл, id сессии поиска).
 CREATE TABLE IF NOT EXISTS kv (
@@ -222,9 +282,9 @@ func (s *store) forgetMemory(chatID, id int64) (bool, error) {
 
 // ── Подтверждения ──────────────────────────────────────────────────────────
 
-func (s *store) createAction(chatID int64, tool, args, summary string) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO actions(chat_id, tool, args, summary) VALUES(?, ?, ?, ?)`,
-		chatID, tool, args, summary)
+func (s *store) createAction(chatID, taskID int64, tool, args, summary string) (int64, error) {
+	res, err := s.db.Exec(`INSERT INTO actions(chat_id, task_id, tool, args, summary) VALUES(?, ?, ?, ?, ?)`,
+		chatID, taskID, tool, args, summary)
 	if err != nil {
 		return 0, err
 	}
@@ -249,11 +309,19 @@ func (s *store) finishAction(id int64, result string) error {
 	return err
 }
 
-// expirePending — на старте: агент, ждавший ответа, умер вместе с
+// actionTask — какой задаче принадлежит подтверждение (0 — чату).
+func (s *store) actionTask(id int64) (int64, error) {
+	var taskID int64
+	err := s.db.QueryRow(`SELECT task_id FROM actions WHERE id = ?`, id).Scan(&taskID)
+	return taskID, err
+}
+
+// expirePending — на старте: агент чата, ждавший ответа, умер вместе с
 // прошлым процессом, и нажатие на старую кнопку ничего бы не сделало.
+// Подтверждения задач не трогаем: задача ждёт в базе и дождётся.
 func (s *store) expirePending() (int64, error) {
 	res, err := s.db.Exec(`UPDATE actions SET status = 'expired', decided_at = CURRENT_TIMESTAMP
-		WHERE status = 'pending'`)
+		WHERE status = 'pending' AND task_id = 0`)
 	if err != nil {
 		return 0, err
 	}
