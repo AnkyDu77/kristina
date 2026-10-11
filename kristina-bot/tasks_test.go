@@ -248,7 +248,7 @@ func TestCompactTranscript(t *testing.T) {
 		{Role: "tool", Content: big}, {Role: "tool", Content: big}, {Role: "tool", Content: big},
 		{Role: "assistant", Content: "a"}, {Role: "tool", Content: big}, {Role: "assistant", Content: "b"}, {Role: "user", Content: "c"},
 	}}
-	compactTranscript(tk)
+	compactTranscript(tk, minTaskBudget)
 	if len([]rune(tk.Transcript[2].Content)) > 500 || len([]rune(tk.Transcript[3].Content)) > 500 {
 		t.Fatal("старая выдача должна сократиться")
 	}

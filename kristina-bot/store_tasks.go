@@ -24,7 +24,7 @@ type planStep struct {
 // остальные — из того же хода модели, ещё не выполненные.
 type pendingCall struct {
 	Calls    []toolCall `json:"calls"`
-	Kind     string     `json:"kind"` // input | approval
+	Kind     string     `json:"kind"` // input | approval | checkin (раунды позади — продолжать?)
 	ActionID int64      `json:"action_id,omitempty"`
 	Summary  string     `json:"summary,omitempty"`
 	Question string     `json:"question,omitempty"`
@@ -51,15 +51,20 @@ type task struct {
 	Error      string
 	CardMsgID  int64
 	AskMsgID   int64
+	// Раунды: сколько позади, с какого шага начался текущий и журнал
+	// передачи (что сделано, что осталось) — с ним задача живёт дальше
+	Round     int
+	RoundBase int
+	Journal   string
 }
 
-const taskCols = `id, chat_id, goal, status, plan, transcript, steps, note, pending, result, error, card_msg_id, ask_msg_id`
+const taskCols = `id, chat_id, goal, status, plan, transcript, steps, note, pending, result, error, card_msg_id, ask_msg_id, round, round_base, journal`
 
 func scanTask(row interface{ Scan(...any) error }) (*task, error) {
 	var t task
 	var plan, transcript, pending string
 	if err := row.Scan(&t.ID, &t.ChatID, &t.Goal, &t.Status, &plan, &transcript, &t.Steps, &t.Note,
-		&pending, &t.Result, &t.Error, &t.CardMsgID, &t.AskMsgID); err != nil {
+		&pending, &t.Result, &t.Error, &t.CardMsgID, &t.AskMsgID, &t.Round, &t.RoundBase, &t.Journal); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(plan), &t.Plan)
@@ -149,8 +154,9 @@ func (s *store) setTaskStatus(id int64, to string, from ...string) (bool, error)
 // saveTaskProgress — всё, кроме статуса.
 func (s *store) saveTaskProgress(t *task) error {
 	_, err := s.db.Exec(`UPDATE tasks SET plan = ?, transcript = ?, steps = ?, note = ?, pending = ?,
-		card_msg_id = ?, ask_msg_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		jsonStr(t.Plan), jsonStr(t.Transcript), t.Steps, t.Note, pendingStr(t.Pending), t.CardMsgID, t.AskMsgID, t.ID)
+		card_msg_id = ?, ask_msg_id = ?, round = ?, round_base = ?, journal = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		jsonStr(t.Plan), jsonStr(t.Transcript), t.Steps, t.Note, pendingStr(t.Pending), t.CardMsgID, t.AskMsgID,
+		t.Round, t.RoundBase, t.Journal, t.ID)
 	return err
 }
 

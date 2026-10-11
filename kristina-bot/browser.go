@@ -50,12 +50,21 @@ var browserPolicy = map[string]string{
 
 var errBrowserAsleep = errors.New("браузер живёт на видеокарте, а она спит")
 
+// Поиск браузера: сколько ждём ответа и через сколько пробуем снова, если
+// не нашёлся. var — чтобы тест не ждал по-настоящему.
+var (
+	browserProbeTimeout = 15 * time.Second
+	browserRetry        = 2 * time.Minute
+)
+
 type browserState struct {
 	mu         sync.Mutex
 	endpoint   string     // для какого адреса client и найденные инструменты
 	client     *mcpClient // сессия живёт, пока жива машина
 	discovered bool
-	lastErr    string // чтобы не сыпать в лог одной и той же ошибкой
+	lastErr    string    // чтобы не сыпать в лог одной и той же ошибкой
+	probing    bool      // поиск уже идёт — второй не запускаем
+	retryAt    time.Time // не нашёлся — раньше этого не пробуем
 }
 
 // browserURL — адрес браузера на работающей машине; ok=false — машины нет.
@@ -99,15 +108,46 @@ func (b *bot) browserClient() (*mcpClient, error) {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
 	if bs.endpoint != url || bs.client == nil {
-		bs.endpoint, bs.discovered = url, false
+		// Новая машина — старые неудачи не в счёт
+		bs.endpoint, bs.discovered, bs.retryAt = url, false, time.Time{}
 		bs.client = newMCPClient(url, b.media.key, browserTimeout, browserMaxBody)
 	}
 	return bs.client, nil
 }
 
-// ensureBrowser находит инструменты браузера на поднятой машине. Дёшево,
-// если уже нашли: вызывается перед каждым ответом и шагом задачи.
+// ensureBrowser — перед каждым ответом и шагом задачи: если браузер ещё не
+// найден, запускает поиск в фоне и сразу возвращается. Ответ его не ждёт:
+// раньше лежащий браузер добавлял к КАЖДОМУ сообщению 15 секунд таймаута.
+// Найдётся — будет в инструментах со следующего хода.
 func (b *bot) ensureBrowser(ctx context.Context) {
+	if _, ok := b.browserURL(); !ok || b.browserReady() {
+		return
+	}
+	if _, err := b.browserClient(); err != nil { // заодно сброс retryAt на новой машине
+		return
+	}
+	bs := &b.browser
+	bs.mu.Lock()
+	if bs.probing || time.Now().Before(bs.retryAt) {
+		bs.mu.Unlock()
+		return
+	}
+	bs.probing = true
+	bs.mu.Unlock()
+	go func() {
+		defer func() {
+			bs.mu.Lock()
+			bs.probing = false
+			bs.mu.Unlock()
+		}()
+		b.probeBrowser(context.WithoutCancel(ctx))
+	}()
+}
+
+// probeBrowser ищет инструменты браузера и ждёт ответа. Синхронно — только
+// при подъёме карты: там лишние секунды до первого ответа — норма, зато
+// отложенные вопросы уже увидят браузер.
+func (b *bot) probeBrowser(ctx context.Context) {
 	if _, ok := b.browserURL(); !ok || b.browserReady() {
 		return
 	}
@@ -115,14 +155,15 @@ func (b *bot) ensureBrowser(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, browserProbeTimeout)
 	defer cancel()
 	list, err := c.listTools(ctx)
 	if err != nil {
 		b.browser.mu.Lock()
+		b.browser.retryAt = time.Now().Add(browserRetry)
 		if msg := err.Error(); msg != b.browser.lastErr {
 			b.browser.lastErr = msg
-			log.Printf("browser: не нашёлся на %s: %v", c.url, err)
+			log.Printf("browser: не нашёлся на %s: %v — следующая попытка через %s", c.url, err, browserRetry)
 		}
 		b.browser.mu.Unlock()
 		return

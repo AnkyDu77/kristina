@@ -191,12 +191,29 @@ variable "llm_model_path" {
   description = <<-EOT
     Какую модель синкать и грузить: "<publisher>/<model>" внутри
     llm_models_uri. TTS + MuseTalk занимают ~17 GB VRAM, так что модель с
-    контекстом должна уместиться в остаток карты: Qwen3.6-27B Q4_K_M
-    (~16.5 GB + mmproj ~0.9 GB + KV-кэш) на 48 GB помещается. Агенту нужен
+    контекстом должна уместиться в остаток карты: Qwen3.8-27B Q4_K_M
+    (~16.8 GB + mmproj ~0.9 GB + KV-кэш) на 48 GB помещается. Агенту нужен
     уверенный вызов инструментов — gpt-oss-20b с этим справляется хуже.
+    Только GGUF: MLX-сборки (как в LM Studio на маке) на Linux не работают.
   EOT
   type        = string
-  default     = "lmstudio-community/Qwen3.6-27B-GGUF"
+  default     = "lmstudio-community/Qwen3.8-27B-GGUF"
+}
+
+variable "llm_hf_repo" {
+  description = <<-EOT
+    Откуда взять модель, если в S3 её ещё нет: репозиторий Hugging Face.
+    Машина скачает llm_hf_files и положит их в S3 (при write_cache). Пусто —
+    не качать: модели нет в S3 — провижининг упадёт с понятной ошибкой.
+  EOT
+  type        = string
+  default     = "lmstudio-community/Qwen3.8-27B-GGUF"
+}
+
+variable "llm_hf_files" {
+  description = "Какие файлы llm_hf_repo нужны: сама модель (один квант!) и mmproj для картинок. Два кванта в одной папке — LM Studio возьмёт какой захочет"
+  type        = list(string)
+  default     = ["Qwen3.8-27B-Q4_K_M.gguf", "mmproj-Qwen3.8-27B-BF16.gguf"]
 }
 
 variable "llm_model_key" {

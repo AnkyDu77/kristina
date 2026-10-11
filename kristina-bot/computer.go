@@ -239,7 +239,7 @@ func (b *bot) computerTools() []*tool {
 			if err != nil {
 				return "", err
 			}
-			return formatRun(command, out, code), nil
+			return formatRun(command, out, code) + offlineHint(out, code, b.cfg.sandboxNetwork), nil
 		},
 	}
 	// С сетью песочница может ходить куда угодно — тогда каждая команда
@@ -322,6 +322,24 @@ func (b *bot) installArgs(a json.RawMessage) (dir string, argv []string, err err
 		}
 	}
 	return dir, argv, nil
+}
+
+// netFailRe — признаки того, что команда упала, потянувшись в сеть: DNS не
+// резолвится, хост недоступен, next/font не скачал шрифт.
+var netFailRe = regexp.MustCompile(`(?i)(ENOTFOUND|EAI_AGAIN|getaddrinfo|ECONNREFUSED|ENETUNREACH|` +
+	`Could not resolve host|dial tcp: lookup|no such host|Temporary failure in name resolution|` +
+	`network is unreachable|Failed to fetch( font)?|fetch failed|Failed to download)`)
+
+// offlineHint — подсказка к выводу команды, упавшей из-за сети. Модель
+// помнит правило «сборка — офлайн» из промпта не всегда, а мимо строки
+// прямо под ошибкой не пройдёт: вместо «на хосте соберётся» — чинит проект.
+func offlineHint(out string, code int, network string) string {
+	if code == 0 || network != "none" || !netFailRe.MatchString(out) {
+		return ""
+	}
+	return "\n[подсказка бота: команда потянулась в сеть, а её в песочнице нет — и не должно быть на сборке. " +
+		"Зависимости — через install_deps; шрифты — @fontsource/<шрифт> или next/font/local вместо next/font/google; " +
+		"ассеты — файлами в проекте. Переделай проект так, чтобы сборка шла без сети, и собери снова.]"
 }
 
 func clampTimeout(sec int64, def, max time.Duration) time.Duration {

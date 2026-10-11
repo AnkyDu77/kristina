@@ -49,6 +49,11 @@ var migrations = []string{
 	// 0 — подтверждение из чата (агент ждёт его, блокируясь); иначе — из
 	// фоновой задачи, которая на это время припаркована в базе
 	`ALTER TABLE actions ADD COLUMN task_id INTEGER NOT NULL DEFAULT 0`,
+	// Раунды фоновых задач: номер, с какого шага начался текущий, журнал
+	// передачи — с ним задача продолжает после сжатия хода
+	`ALTER TABLE tasks ADD COLUMN round INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE tasks ADD COLUMN round_base INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE tasks ADD COLUMN journal TEXT NOT NULL DEFAULT ''`,
 }
 
 const schema = `

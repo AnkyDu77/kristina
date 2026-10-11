@@ -26,12 +26,8 @@ import (
 	"unicode/utf8"
 )
 
-const (
-	// Сколько выдачи инструментов держим в ходе задачи, рун (~20k токенов
-	// при контексте 32k). Старая выдача сверх этого — сокращается.
-	taskContextBudget = 60000
-	taskKeepRecent    = 4 // последние сообщения не сокращаем
-)
+// taskKeepRecent — последние сообщения хода при сжатии не трогаем.
+const taskKeepRecent = 4
 
 type taskRunner struct {
 	b    *bot
@@ -140,27 +136,33 @@ func (r *taskRunner) run(ctx context.Context, id int64) {
 
 func (b *bot) execTask(ctx context.Context, t *task) error {
 	if len(t.Transcript) == 0 {
-		mems, err := b.store.memories(t.ChatID)
-		if err != nil {
+		if err := b.freshTranscript(t); err != nil {
 			return err
-		}
-		t.Transcript = []chatMsg{
-			{Role: "system", Content: systemPrompt(mems, time.Now().In(b.cfg.tz), b.promptOpts(true))},
-			{Role: "user", Content: "Задача: " + t.Goal},
 		}
 	}
 
+	finishing := false // владелец сказал «подведи итог» — последний ход без инструментов
 	if p := t.Pending; p != nil {
 		if !p.resolved() {
 			// Сняли с паузы, а ответа владельца так и нет — ждём дальше
 			_, err := b.store.setTaskStatus(t.ID, "waiting", "running")
 			return err
 		}
-		t.Transcript = append(t.Transcript, chatMsg{Role: "tool", ToolCallID: p.Calls[0].ID, Content: b.resolvePending(ctx, t, p)})
-		rest := p.Calls[1:]
 		t.Pending = nil
-		if parked, err := b.taskCalls(ctx, t, rest); parked || err != nil {
-			return err
+		if p.Kind == "checkin" {
+			switch p.Answer {
+			case checkinStop:
+				finishing = true
+			case checkinGo:
+			default:
+				// Ответил реплаем — это указание на следующий раунд
+				t.Transcript = append(t.Transcript, chatMsg{Role: "user", Content: "Владелец: " + p.Answer})
+			}
+		} else {
+			t.Transcript = append(t.Transcript, chatMsg{Role: "tool", ToolCallID: p.Calls[0].ID, Content: b.resolvePending(ctx, t, p)})
+			if parked, err := b.taskCalls(ctx, t, p.Calls[1:]); parked || err != nil {
+				return err
+			}
 		}
 		if err := b.store.saveTaskProgress(t); err != nil {
 			return err
@@ -173,26 +175,33 @@ func (b *bot) execTask(ctx context.Context, t *task) error {
 		if st := b.store.taskStatus(t.ID); st != "running" {
 			return nil
 		}
-		compactTranscript(t)
+		// Раунд исчерпан — не обрываем задачу, а подводим промежуточный
+		// итог и продолжаем с чистого листа
+		if !finishing && t.Steps-t.RoundBase >= b.cfg.taskMaxSteps {
+			if stop, err := b.endRound(ctx, t); stop || err != nil {
+				return err
+			}
+			continue
+		}
+		compactTranscript(t, b.taskBudget())
 		b.ensureBrowser(ctx) // карта могла проснуться, пока задача ждала
 		msgs, tools := t.Transcript, b.specs(inTask)
-		last := t.Steps >= b.cfg.taskMaxSteps
-		if last {
+		if finishing {
 			tools = nil
 			msgs = append(append([]chatMsg(nil), msgs...), chatMsg{Role: "user",
-				Content: "(Шаги закончились. Подведи итог тем, что удалось сделать, и честно скажи, чего не успела.)"})
+				Content: "(Владелец попросил подвести итог. Расскажи, что сделано и проверено, и честно — чего не успела.)"})
 		}
 		b.refreshCard(ctx, t)
 		out, err := b.think(ctx, msgs, tools)
 		if err != nil {
 			return err
 		}
-		if len(out.ToolCalls) == 0 && !last && hasCallMarkup(out.Content) && badMarkup < maxMarkupRetries {
+		if len(out.ToolCalls) == 0 && !finishing && hasCallMarkup(out.Content) && badMarkup < maxMarkupRetries {
 			badMarkup++
 			t.Transcript = append(t.Transcript, out, chatMsg{Role: "user", Content: markupNudge})
 			continue
 		}
-		if len(out.ToolCalls) == 0 || last {
+		if len(out.ToolCalls) == 0 || finishing {
 			result := stripCallMarkup(out.Content)
 			if result == "" {
 				return errBrainEmpty
@@ -208,6 +217,103 @@ func (b *bot) execTask(ctx context.Context, t *task) error {
 			return err
 		}
 	}
+}
+
+// freshTranscript — начало хода задачи: цель, а со второго раунда — и
+// журнал передачи. Системный промпт — свежий (память могла пополниться).
+func (b *bot) freshTranscript(t *task) error {
+	mems, err := b.store.memories(t.ChatID)
+	if err != nil {
+		return err
+	}
+	goal := "Задача: " + t.Goal
+	if t.Journal != "" {
+		goal += fmt.Sprintf("\n\nТы уже работаешь над ней, это раунд %d. Всё, что было раньше, — в журнале ниже; "+
+			"файлы в /workspace — смотри их, а не полагайся на память.\n\nЖурнал:\n%s\n\nПродолжай со «Следующего шага».",
+			t.Round+1, t.Journal)
+	}
+	t.Transcript = []chatMsg{
+		{Role: "system", Content: systemPrompt(mems, time.Now().In(b.cfg.tz), b.promptOpts(true))},
+		{Role: "user", Content: goal},
+	}
+	return nil
+}
+
+const (
+	checkinGo   = "▶️ Продолжай"
+	checkinStop = "🏁 Подведи итог"
+	doneMarker  = "ГОТОВО:"
+)
+
+func journalPrompt(round, steps int) string {
+	return fmt.Sprintf(`(Раунд %d закончен, шагов в нём: %d. Сейчас твой ход будет сжат: дальше ты продолжишь только по журналу — чего в нём нет, то забудется. Напиши журнал передачи, по существу и конкретно:
+Сделано: — за всё время задачи: файлы, команды, результаты
+Проверено: — что собрано/запущено/протестировано и с каким итогом
+Осталось: — что ещё нужно до цели
+Следующий шаг: — с чего продолжить
+Застряла: да или нет — «да», если раунд ушёл на одни и те же ошибки без продвижения
+Если цель уже полностью достигнута и проверена — вместо журнала начни ответ с «%s» и дай итоговый отчёт для владельца.)`,
+		round, steps, doneMarker)
+}
+
+// endRound закрывает раунд: журнал передачи → свежий ход с журналом.
+// stop=true — задача закончилась (цель достигнута) или встала на
+// контрольную точку и ждёт владельца.
+func (b *bot) endRound(ctx context.Context, t *task) (stop bool, err error) {
+	round, steps := t.Round+1, t.Steps-t.RoundBase
+	t.Note = fmt.Sprintf("📝 Подвожу итог раунда %d", round)
+	b.refreshCard(ctx, t)
+	msgs := append(append([]chatMsg(nil), t.Transcript...), chatMsg{Role: "user", Content: journalPrompt(round, steps)})
+	out, err := b.think(ctx, msgs, nil)
+	if err != nil {
+		return true, err // уснула карта — раунд закроется заново после подъёма
+	}
+	text := stripCallMarkup(out.Content)
+	if rest, ok := strings.CutPrefix(strings.TrimSpace(text), doneMarker); ok {
+		return true, b.completeTask(ctx, t, strings.TrimSpace(rest))
+	}
+	if text == "" {
+		text = "(журнал не написался — смотри файлы в /workspace)"
+	}
+
+	// Ни одного удачного вызова за раунд — объективный признак буксовки,
+	// даже если модель сама этого не признала
+	ok := 0
+	for _, m := range t.Transcript {
+		if m.Role == "tool" && !strings.HasPrefix(m.Content, "ошибка") {
+			ok++
+		}
+	}
+	stalled := ok == 0 || strings.Contains(strings.ToLower(text), "застряла: да")
+
+	t.Journal, t.Round, t.RoundBase, t.Note = text, round, t.Steps, ""
+	if err := b.freshTranscript(t); err != nil {
+		return true, err
+	}
+	switch {
+	case stalled:
+		return true, b.parkCheckin(ctx, t, fmt.Sprintf("Задача #%d, похоже, буксует (раунд %d, шагов %d).", t.ID, round, t.Steps))
+	case b.cfg.taskCheckinRounds > 0 && round%b.cfg.taskCheckinRounds == 0:
+		return true, b.parkCheckin(ctx, t, fmt.Sprintf("Задача #%d: позади раундов — %d, шагов — %d.", t.ID, round, t.Steps))
+	}
+	return false, b.store.saveTaskProgress(t)
+}
+
+// parkCheckin — контрольная точка: дальше только с решения владельца.
+// Пока он думает, задача лежит в базе и видеокарту не держит.
+func (b *bot) parkCheckin(ctx context.Context, t *task, head string) error {
+	q := head + "\n\n" + truncRunes(t.Journal, 1500) + "\n\nПродолжать? Можно ответить реплаем — это будет указание на следующий раунд."
+	rows := [][]tgButton{{
+		{Text: checkinGo, Data: fmt.Sprintf("ans:%d:0", t.ID)},
+		{Text: checkinStop, Data: fmt.Sprintf("ans:%d:1", t.ID)},
+	}}
+	msgID, err := b.tg.sendButtons(ctx, t.ChatID, "🧭 "+q, rows)
+	if err != nil {
+		return err
+	}
+	t.Pending = &pendingCall{Kind: "checkin", Question: head, Options: []string{checkinGo, checkinStop}}
+	t.AskMsgID = msgID
+	return b.park(t)
 }
 
 // taskCalls выполняет вызовы одного хода модели. Вызов, которому нужен
@@ -348,12 +454,12 @@ func (b *bot) completeTask(ctx context.Context, t *task, result string) error {
 // compactTranscript сокращает старую выдачу инструментов, если ход задачи
 // перестал влезать в контекст. Модель уже сделала из неё выводы — они в её
 // же репликах; дословно держать старые страницы незачем.
-func compactTranscript(t *task) {
+func compactTranscript(t *task, budget int) {
 	total := 0
 	for _, m := range t.Transcript {
 		total += utf8.RuneCountInString(m.Content)
 	}
-	for i := 0; i < len(t.Transcript)-taskKeepRecent && total > taskContextBudget; i++ {
+	for i := 0; i < len(t.Transcript)-taskKeepRecent && total > budget; i++ {
 		m := &t.Transcript[i]
 		if m.Role != "tool" || utf8.RuneCountInString(m.Content) <= 500 {
 			continue
@@ -382,6 +488,8 @@ func (b *bot) cardText(t *task) string {
 	case "waiting":
 		if t.Pending != nil && t.Pending.Kind == "approval" {
 			sb.WriteString("🤚 Жду подтверждения: " + truncRunes(t.Pending.Summary, 200))
+		} else if t.Pending != nil && t.Pending.Kind == "checkin" {
+			sb.WriteString("🧭 Жду решения: продолжать?")
 		} else {
 			sb.WriteString("❓ Жду твоего ответа")
 		}
@@ -393,6 +501,9 @@ func (b *bot) cardText(t *task) string {
 		sb.WriteString("⚠️ Не вышло: " + truncRunes(t.Error, 300))
 	case "cancelled":
 		sb.WriteString("✖️ Отменена")
+	}
+	if t.Round > 0 {
+		fmt.Fprintf(&sb, " · раунд %d", t.Round+1)
 	}
 	if t.Steps > 0 {
 		fmt.Fprintf(&sb, " · шагов: %d", t.Steps)
@@ -555,7 +666,7 @@ func (b *bot) onTaskButton(ctx context.Context, cq *tgCallback, id int64, op str
 // answerTaskInput — ответ владельца на вопрос задачи (кнопка или реплай).
 func (b *bot) answerTaskInput(ctx context.Context, t *task, answer string) (bool, error) {
 	p := t.Pending
-	if p == nil || p.Kind != "input" || p.resolved() {
+	if p == nil || (p.Kind != "input" && p.Kind != "checkin") || p.resolved() {
 		return false, nil
 	}
 	p.Answer = answer
@@ -563,7 +674,7 @@ func (b *bot) answerTaskInput(ctx context.Context, t *task, answer string) (bool
 	if err != nil || !ok {
 		return false, err
 	}
-	_ = b.tg.editText(ctx, t.ChatID, t.AskMsgID, fmt.Sprintf("❓ Задача #%d спрашивала:\n%s\n\n→ %s", t.ID, p.Question, truncRunes(answer, 500)), nil)
+	_ = b.tg.editText(ctx, t.ChatID, t.AskMsgID, fmt.Sprintf("❓ Задача #%d спрашивала:\n%s\n\n→ %s", t.ID, truncRunes(p.Question, 1500), truncRunes(answer, 500)), nil)
 	if fresh, err := b.store.getTask(t.ID); err == nil {
 		b.refreshCard(ctx, fresh)
 	}

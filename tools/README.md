@@ -126,6 +126,25 @@ cd /root/kristina && tools/build_images.sh
 зависимости в `media/<сервис>/base/` — залей проект заново и запусти
 скрипт ещё раз (или просто подними GPU: соберёт сама).
 
+## (г) Модель «мозга» → S3 (VPS бота)
+
+```bash
+tools/fetch_model.sh                                   # Qwen3.8-27B Q4_K_M + mmproj, ~17.7 GB
+tools/fetch_model.sh <hf-репо> <файл.gguf> [mmproj…]   # любая другая GGUF-модель
+```
+
+Стримит файлы с Hugging Face прямо в `s3://lmify-models/models/<репо>/`,
+без копии на диске, поэтому хватит и маленькой VPS. Уже залитые файлы
+пропускает. Нужны `curl`, aws CLI и `tools/s3.env`. Запускать с VPS бота:
+с мака под Happ S3 Selectel виснет.
+
+Это необязательно: не найдя модель в S3, GPU-машина скачает её с HF сама
+(`llm_hf_repo`, `llm_hf_files` в `selectel/`) и положит в S3. Но тогда
+десяток минут скачивания оплачивается по тарифу GPU.
+
+Брать только **GGUF**. MLX-сборки, которые LM Studio качает на маке
+(`…-MLX-4bit`), на Linux не работают.
+
 ## (в) Живое лицо: idle-луп на маке, бесплатно
 
 `idle-loop/make_idle.py` оживляет фото через **LivePortrait**. Чужое видео

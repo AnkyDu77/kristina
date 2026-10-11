@@ -22,9 +22,10 @@ import (
 
 const (
 	toolTimeout = 90 * time.Second
-	// Выдача инструментов за один ответ, рун. Дальше — отвечать тем, что
-	// есть: иначе переполним контекст модели.
-	maxToolBudget = 40000
+	// Нижние пороги бюджетов (рун) — под контекст 32k; больше контекст —
+	// больше бюджет (budgets.go)
+	minChatToolBudget = 40000
+	minTaskBudget     = 60000
 	// approvalPrefix — начало вопроса «можно?»; по нему callback узнаёт
 	// суть действия, чтобы переписать сообщение итогом.
 	approvalPrefix = "🤚 Можно? "
@@ -63,9 +64,11 @@ func (b *bot) think(ctx context.Context, msgs []chatMsg, tools []toolSpec) (chat
 
 // runAgent возвращает итоговый ответ и сколько инструментов он стоил:
 // по этому числу решаем, была ли задача «крупной» и заслуживает ли кружка.
-func (b *bot) runAgent(ctx context.Context, chatID int64, msgs []chatMsg) (answer string, steps int, err error) {
+// exhausted — ответ вымучен лимитом (шагов или выдачи), а не закончен
+// моделью: работу стоит продолжить фоновой задачей.
+func (b *bot) runAgent(ctx context.Context, chatID int64, msgs []chatMsg) (answer string, steps int, exhausted bool, err error) {
 	prog := &progress{b: b, chatID: chatID}
-	budget := maxToolBudget
+	budget := b.chatToolBudget()
 	badMarkup := 0
 	for turn := 0; ; turn++ {
 		last := turn >= b.cfg.maxSteps || budget <= 0
@@ -80,7 +83,7 @@ func (b *bot) runAgent(ctx context.Context, chatID int64, msgs []chatMsg) (answe
 		}
 		out, err := b.think(ctx, msgs, tools)
 		if err != nil {
-			return "", steps, err
+			return "", steps, false, err
 		}
 		if len(out.ToolCalls) == 0 && !last && hasCallMarkup(out.Content) && badMarkup < maxMarkupRetries {
 			badMarkup++
@@ -90,10 +93,10 @@ func (b *bot) runAgent(ctx context.Context, chatID int64, msgs []chatMsg) (answe
 		if len(out.ToolCalls) == 0 || last {
 			answer := stripCallMarkup(out.Content)
 			if answer == "" {
-				return "", steps, errBrainEmpty
+				return "", steps, false, errBrainEmpty
 			}
 			prog.done(ctx)
-			return answer, steps, nil
+			return answer, steps, last && steps > 0, nil
 		}
 
 		msgs = append(msgs, out)
@@ -104,7 +107,7 @@ func (b *bot) runAgent(ctx context.Context, chatID int64, msgs []chatMsg) (answe
 			msgs = append(msgs, chatMsg{Role: "tool", ToolCallID: tc.ID, Content: res})
 		}
 		if ctx.Err() != nil {
-			return "", steps, ctx.Err()
+			return "", steps, false, ctx.Err()
 		}
 	}
 }

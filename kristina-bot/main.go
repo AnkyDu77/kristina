@@ -70,13 +70,16 @@ func main() {
 		circleMinTools:  envInt("KRISTINA_CIRCLE_MIN_TOOLS", 3),
 		approvalTimeout: approvalTimeout,
 		tz:              tz,
-		taskMaxSteps:    envInt("KRISTINA_TASK_MAX_STEPS", 25),
-		monitorDefault:  envDuration("KRISTINA_MONITOR_DEFAULT", time.Hour),
-		monitorMin:      envDuration("KRISTINA_MONITOR_MIN", 10*time.Minute),
-		browserEnabled:  envStr("KRISTINA_BROWSER", "1") != "0",
-		browserURL:      strings.TrimRight(os.Getenv("KRISTINA_BROWSER_URL"), "/"),
-		sandboxNetwork:  envStr("KRISTINA_SANDBOX_NETWORK", "none"),
-		sandboxInstall:  envStr("KRISTINA_SANDBOX_INSTALL_NETWORK", "bridge") != "none",
+		// шагов в раунде; старое имя — для .env прошлых версий
+		taskMaxSteps:      envInt("KRISTINA_TASK_ROUND_STEPS", envInt("KRISTINA_TASK_MAX_STEPS", 25)),
+		taskCheckinRounds: envInt("KRISTINA_TASK_CHECKIN_ROUNDS", 3),
+		contextTokens:     envInt("KRISTINA_CONTEXT_TOKENS", 32768),
+		monitorDefault:    envDuration("KRISTINA_MONITOR_DEFAULT", time.Hour),
+		monitorMin:        envDuration("KRISTINA_MONITOR_MIN", 10*time.Minute),
+		browserEnabled:    envStr("KRISTINA_BROWSER", "1") != "0",
+		browserURL:        strings.TrimRight(os.Getenv("KRISTINA_BROWSER_URL"), "/"),
+		sandboxNetwork:    envStr("KRISTINA_SANDBOX_NETWORK", "none"),
+		sandboxInstall:    envStr("KRISTINA_SANDBOX_INSTALL_NETWORK", "bridge") != "none",
 		// сборка Next.js или холодный go build на одном vCPU — минуты
 		sandboxMaxTimeout: envDuration("KRISTINA_SANDBOX_MAX_TIMEOUT", 10*time.Minute),
 	}

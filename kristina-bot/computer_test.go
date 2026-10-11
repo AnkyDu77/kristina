@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -279,6 +280,7 @@ func TestBrowserToolsFollowGPUAndPolicy(t *testing.T) {
 	gpu.mu.Lock()
 	gpu.state, gpu.endpoint = "running", strings.TrimSuffix(burl, "/browser/mcp")
 	gpu.mu.Unlock()
+	b.probeBrowser(context.Background()) // как onReady после подъёма
 	b.handle(context.Background(), 100, &chatState{}, incoming{from: 1, text: "открой go.dev"})
 
 	if got := calls(); len(got) != 1 || got[0] != "browser_navigate" {
@@ -385,4 +387,78 @@ func TestBuildFlowWithInstallDeps(t *testing.T) {
 func strconvQuote(s string) string {
 	raw, _ := json.Marshal(s)
 	return string(raw)
+}
+
+func TestHangingBrowserDoesNotDelayAnswers(t *testing.T) {
+	oldTimeout, oldRetry := browserProbeTimeout, browserRetry
+	browserProbeTimeout, browserRetry = 300*time.Millisecond, time.Hour
+	t.Cleanup(func() { browserProbeTimeout, browserRetry = oldTimeout, oldRetry })
+
+	// Браузер, который принимает соединение и молчит (как за файрволом)
+	var probes atomic.Int32
+	release := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probes.Add(1)
+		<-release
+	}))
+	t.Cleanup(func() { close(release); hang.Close() })
+
+	base, _ := fakeLLM(t, say("раз"), say("два"))
+	b, _ := agentBot(t, base)
+	b.cfg.browserEnabled, b.cfg.browserURL, b.cfg.llmBase = true, hang.URL+"/browser/mcp", base+"/v1"
+	b.media = newMediaClient("mk")
+
+	start := time.Now()
+	b.handle(context.Background(), 100, &chatState{}, incoming{from: 1, text: "привет"})
+	b.handle(context.Background(), 100, &chatState{}, incoming{from: 1, text: "ещё"})
+	if took := time.Since(start); took > 250*time.Millisecond {
+		t.Fatalf("ответы ждали браузер: %s", took)
+	}
+	time.Sleep(500 * time.Millisecond) // фоновый поиск успел сдаться
+	b.ensureBrowser(context.Background())
+	time.Sleep(100 * time.Millisecond)
+	if n := probes.Load(); n != 1 {
+		t.Fatalf("после неудачи — пауза, а не долбёжка: попыток %d", n)
+	}
+	if b.browserReady() {
+		t.Fatal("браузер не нашёлся, а считается готовым")
+	}
+}
+
+func TestOfflineHint(t *testing.T) {
+	nextFont := "▲ Next.js 15.5\n   Creating an optimized production build ...\nFailed to compile.\n" +
+		"`next/font` error:\nFailed to fetch `Playfair Display` from Google Fonts.\n"
+	goGet := "go: github.com/a/b@v1.2.3: Get \"https://proxy.golang.org/...\": dial tcp: lookup proxy.golang.org on 127.0.0.11:53: no such host\n"
+	for name, c := range map[string]struct {
+		out     string
+		code    int
+		network string
+		hint    bool
+	}{
+		"next/font/google":    {nextFont, 1, "none", true},
+		"go без сети":         {goGet, 1, "none", true},
+		"успешная сборка":     {"✓ Compiled successfully\nfetch failed retries: 0", 0, "none", false},
+		"обычная ошибка кода": {"./main.go:3:2: undefined: foo", 1, "none", false},
+		"сеть включена":       {goGet, 1, "bridge", false},
+	} {
+		if got := offlineHint(c.out, c.code, c.network) != ""; got != c.hint {
+			t.Errorf("%s: подсказка=%v, ждали %v", name, got, c.hint)
+		}
+	}
+}
+
+func TestRunCommandAddsOfflineHint(t *testing.T) {
+	sb := &fakeSandbox{out: "Failed to fetch `DM Sans` from Google Fonts.", code: 1}
+	base, _ := fakeLLM(t,
+		callTool("run_command", `{"command":"npm run build"}`),
+		func(t *testing.T, req llmRequest) map[string]any {
+			if res := req.Messages[len(req.Messages)-1].Content; !strings.Contains(res, "@fontsource") {
+				t.Errorf("модель должна увидеть подсказку: %q", res)
+			}
+			return map[string]any{"content": "Переделаю шрифты на @fontsource."}
+		},
+	)
+	b, _ := agentBot(t, base)
+	b.attach(testWorkspace(t), sb, nil)
+	b.handle(context.Background(), 100, &chatState{}, incoming{from: 1, text: "собери"})
 }

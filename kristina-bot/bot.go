@@ -43,8 +43,15 @@ type botConfig struct {
 	circleMinTools  int
 	approvalTimeout time.Duration
 	tz              *time.Location
-	// taskMaxSteps — потолок вызовов инструментов у фоновой задачи
+	// taskMaxSteps — вызовов инструментов в одном раунде фоновой задачи;
+	// после раунда — журнал передачи и следующий раунд
 	taskMaxSteps int
+	// taskCheckinRounds — после скольких раундов спросить владельца
+	// «продолжать?» (0 — не спрашивать; буксующую задачу спросим всё равно)
+	taskCheckinRounds int
+	// contextTokens — контекст модели (llm_context_length): от него
+	// бюджеты выдачи инструментов
+	contextTokens int
 	// мониторы: интервал по умолчанию и минимальный (чаще — уже не
 	// «следить», а долбить чужой сайт)
 	monitorDefault, monitorMin time.Duration
@@ -154,7 +161,7 @@ func (b *bot) run(ctx context.Context) error {
 
 	if b.gpu != nil {
 		b.gpu.setOnReady(func() {
-			b.ensureBrowser(ctx) // до ответов: пусть браузер уже будет в инструментах
+			b.probeBrowser(ctx) // до ответов: пусть браузер уже будет в инструментах
 			b.drainInbox(ctx)
 			b.tasks.poke()
 		})
@@ -428,7 +435,7 @@ func (b *bot) answer(ctx context.Context, chatID int64, cs *chatState, in incomi
 	msgs = append(msgs, chatMsg{Role: "user", Content: text})
 
 	stop := b.keepAction(ctx, chatID, "typing")
-	ans, steps, err := b.runAgent(ctx, chatID, msgs)
+	ans, steps, exhausted, err := b.runAgent(ctx, chatID, msgs)
 	stop()
 	if errors.Is(err, errGPUAsleep) {
 		// Карту погасили посреди ответа (watchdog, /sleep) — вопрос не теряем
@@ -454,6 +461,9 @@ func (b *bot) answer(ctx context.Context, chatID int64, cs *chatState, in incomi
 	}
 	if err := b.sendMarkdown(ctx, chatID, ans); err != nil {
 		return err
+	}
+	if exhausted {
+		b.offerContinue(ctx, chatID, text, ans)
 	}
 
 	// Кружок — только за крупную задачу и только если карта уже не спит:
@@ -551,6 +561,9 @@ func (b *bot) onCallback(ctx context.Context, cq *tgCallback) {
 			}
 			b.onAnswerButton(ctx, cq, id, idx)
 		}
+
+	case cq.Data == "cont":
+		b.onContinue(ctx, cq)
 
 	case strings.HasPrefix(cq.Data, "act:"):
 		// act:<id>:ok|no

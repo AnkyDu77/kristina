@@ -372,7 +372,28 @@ resource "local_file" "setup_script" {
     systemctl enable --now lmstudio-watchdog.timer
 
     echo "=== LLM: ${var.llm_model_path} из S3 ==="
-    aws s3 sync "${var.llm_models_uri}/${var.llm_model_path}" "/root/.lmstudio/models/${var.llm_model_path}" $S3 $Q
+    MODEL_DIR="/root/.lmstudio/models/${var.llm_model_path}"
+    mkdir -p "$MODEL_DIR"
+    aws s3 sync "${var.llm_models_uri}/${var.llm_model_path}" "$MODEL_DIR" $S3 $Q
+
+    # Модели нет в S3 — качаем с Hugging Face сами и кладём в S3: следующий
+    # подъём возьмёт её оттуда (та же схема, что с базами образов). Заранее,
+    # не за деньги GPU, это делает tools/fetch_model.sh
+    # Качаем, только если репозиторий — та же модель, что llm_model_path:
+    # сменили модель в tfvars, а llm_hf_* забыли — не тянуть чужие файлы
+    if ! ls "$MODEL_DIR"/*.gguf > /dev/null 2>&1 && [ -n "${var.llm_hf_repo}" ] \
+       && [ "$(basename "${var.llm_hf_repo}")" = "$(basename "${var.llm_model_path}")" ]; then
+      echo "=== LLM: в S3 нет — качаем ${var.llm_hf_repo} с Hugging Face ==="
+      for f in ${join(" ", var.llm_hf_files)}; do
+        curl -fL --retry 5 --retry-delay 10 -C - -o "$MODEL_DIR/$f.part" \
+          "https://huggingface.co/${var.llm_hf_repo}/resolve/main/$f" \
+          && mv "$MODEL_DIR/$f.part" "$MODEL_DIR/$f"
+      done
+      if [ "$WRITE_CACHE" = "true" ]; then
+        aws s3 sync "$MODEL_DIR" "${var.llm_models_uri}/${var.llm_model_path}" $S3 $Q \
+          || echo "!!! модель не уехала в S3 — в следующий раз скачается заново"
+      fi
+    fi
 
     # Любой вызов lms — с </dev/null и потолком времени: lms умеет
     # спрашивать интерактивно, а ответить тут некому (грабля lmify)
