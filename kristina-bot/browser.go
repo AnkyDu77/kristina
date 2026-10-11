@@ -144,10 +144,7 @@ func (b *bot) ensureBrowser(ctx context.Context) {
 
 func (b *bot) browserTool(mt mcpTool, policy string) *tool {
 	name := mt.Name
-	params := mt.InputSchema
-	if params == nil {
-		params = object(map[string]any{})
-	}
+	params := toolParams(mt.InputSchema)
 	t := &tool{
 		spec:      toolSpecFunc{Name: name, Description: truncRunes(mt.Description, 600), Parameters: params},
 		modes:     everywhere,

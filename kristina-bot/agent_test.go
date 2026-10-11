@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -29,8 +31,21 @@ func fakeLLM(t *testing.T, turns ...llmTurn) (base string, requests func() []llm
 			http.NotFound(w, r)
 			return
 		}
+		raw, _ := io.ReadAll(r.Body)
+		// Строго, как LM Studio: кривая схема инструмента — 400 на весь запрос
+		var generic struct {
+			Tools []map[string]any `json:"tools"`
+		}
+		_ = json.Unmarshal(raw, &generic)
+		for i, tl := range generic.Tools {
+			if err := strictSchema(tl["function"].(map[string]any)["parameters"]); err != nil {
+				t.Errorf("инструмент #%d: %v", i, err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
 		var req llmRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		_ = json.Unmarshal(raw, &req)
 		mu.Lock()
 		got = append(got, req)
 		i := len(got) - 1
@@ -294,5 +309,81 @@ func TestAgentStopsAfterMaxSteps(t *testing.T) {
 	}
 	if len(mcp()) != 0 {
 		t.Fatal("внутренний адрес нельзя отдавать и внешнему сервису")
+	}
+}
+
+// strictSchema — то, на чём споткнулся LM Studio: параметры — объект со
+// свойствами, а required, где есть, — массив строк, а не null.
+func strictSchema(v any) error {
+	m, ok := v.(map[string]any)
+	if !ok || m["type"] != "object" {
+		return fmt.Errorf("parameters — не object: %v", v)
+	}
+	if _, ok := m["properties"].(map[string]any); !ok {
+		return fmt.Errorf("нет properties: %v", v)
+	}
+	var walk func(any) error
+	walk = func(v any) error {
+		switch s := v.(type) {
+		case map[string]any:
+			if r, ok := s["required"]; ok {
+				arr, isArr := r.([]any)
+				if !isArr {
+					return fmt.Errorf("required = %v, ждали массив", r)
+				}
+				for _, x := range arr {
+					if _, ok := x.(string); !ok {
+						return fmt.Errorf("required: %v", arr)
+					}
+				}
+			}
+			for _, c := range s {
+				if err := walk(c); err != nil {
+					return err
+				}
+			}
+		case []any:
+			for _, c := range s {
+				if err := walk(c); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return walk(m)
+}
+
+func TestToolSchemasAreStrict(t *testing.T) {
+	b, _ := agentBot(t, "http://unused")
+	b.attach(testWorkspace(t), &fakeSandbox{}, nil)
+	// Чужие схемы: браузер и внешний сервер прислали кто во что горазд
+	var foreign map[string]any
+	_ = json.Unmarshal([]byte(`{"type":"object","required":null,"properties":{"opts":{"type":"object","required":null,"properties":{}}}}`), &foreign)
+	b.registerTools([]*tool{
+		b.browserTool(mcpTool{Name: "browser_snapshot", InputSchema: foreign}, "free"),
+		b.externalTool(&mcpServer{name: "docs", client: newMCPClient("https://x", "", time.Second, 1)}, mcpTool{Name: "noargs"}),
+	})
+	b.mu.Lock()
+	all := make([]*tool, 0, len(b.tools))
+	for _, tl := range b.tools {
+		all = append(all, tl)
+	}
+	b.mu.Unlock()
+	if len(all) < 15 {
+		t.Fatalf("инструментов подозрительно мало: %d", len(all))
+	}
+	for _, tl := range all {
+		// Ровно то, что уйдёт серверу: через JSON
+		raw, _ := json.Marshal(toolSpec{Type: "function", Function: tl.spec})
+		var back struct {
+			Function struct {
+				Parameters any `json:"parameters"`
+			} `json:"function"`
+		}
+		_ = json.Unmarshal(raw, &back)
+		if err := strictSchema(back.Function.Parameters); err != nil {
+			t.Errorf("%s: %v", tl.spec.Name, err)
+		}
 	}
 }

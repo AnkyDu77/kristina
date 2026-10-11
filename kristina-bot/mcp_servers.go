@@ -89,10 +89,7 @@ var toolNameJunk = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 func (b *bot) externalTool(s *mcpServer, mt mcpTool) *tool {
 	name := truncRunes(s.name+"_"+toolNameJunk.ReplaceAllString(mt.Name, "_"), 64)
 	name = strings.TrimSuffix(name, "…")
-	params := mt.InputSchema
-	if params == nil {
-		params = object(map[string]any{})
-	}
+	params := toolParams(mt.InputSchema)
 	t := &tool{
 		spec: toolSpecFunc{
 			Name:        name,

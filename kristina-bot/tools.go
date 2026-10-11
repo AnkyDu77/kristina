@@ -271,8 +271,52 @@ func formatSources(head string, res webResults) string {
 
 // ── мелочи для JSON-схем и аргументов ──────────────────────────────────────
 
+// object — схема параметров. required — всегда массив, хоть пустой: LM
+// Studio проверяет схему строго, и «required: null» роняет весь запрос
+// (400 «expected array, received null») — а с ним и ответ.
 func object(props map[string]any, required ...string) map[string]any {
+	if required == nil {
+		required = []string{}
+	}
 	return map[string]any{"type": "object", "properties": props, "required": required}
+}
+
+// toolParams — схема параметров чужого инструмента (браузер, внешние MCP),
+// приведённая к виду, который примет строгий сервер: объект со свойствами,
+// а required, где он есть, — массив. Чинится и вглубь: вложенные объекты
+// у Playwright тоже бывают.
+func toolParams(schema map[string]any) map[string]any {
+	if schema == nil {
+		return object(map[string]any{})
+	}
+	fixSchema(schema)
+	if schema["type"] == nil {
+		schema["type"] = "object"
+	}
+	if _, ok := schema["properties"].(map[string]any); !ok {
+		schema["properties"] = map[string]any{}
+	}
+	return schema
+}
+
+func fixSchema(v any) {
+	switch s := v.(type) {
+	case map[string]any:
+		if r, ok := s["required"]; ok {
+			if _, isArr := r.([]any); !isArr {
+				if _, isStrs := r.([]string); !isStrs {
+					delete(s, "required") // null или что-то странное — без него схема валидна
+				}
+			}
+		}
+		for _, child := range s {
+			fixSchema(child)
+		}
+	case []any:
+		for _, child := range s {
+			fixSchema(child)
+		}
+	}
 }
 
 func str(desc string) map[string]any {

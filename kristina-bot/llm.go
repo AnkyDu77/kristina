@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -197,6 +198,9 @@ func (c *llmClient) post(ctx context.Context, base string, body map[string]any, 
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode != http.StatusOK {
+		// В чат — начало (телеграму хватит), в лог — целиком: по обрезку
+		// не понять, какой из инструментов не понравился серверу
+		log.Printf("llm: %s: %s", resp.Status, strings.TrimSpace(string(data[:min(len(data), 8<<10)])))
 		return chatMsg{}, fmt.Errorf("LLM %s: %s", resp.Status, strings.TrimSpace(string(data[:min(len(data), 300)])))
 	}
 	var parsed struct {
