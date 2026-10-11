@@ -55,6 +55,10 @@ type botConfig struct {
 	// сеть песочницы: none — без сети (по умолчанию); иначе каждая
 	// команда — с подтверждением
 	sandboxNetwork string
+	// install_deps — установка зависимостей с сетью (с подтверждением)
+	sandboxInstall bool
+	// потолок времени на команду в песочнице
+	sandboxMaxTimeout time.Duration
 }
 
 type bot struct {

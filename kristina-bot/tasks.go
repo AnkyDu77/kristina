@@ -167,6 +167,7 @@ func (b *bot) execTask(ctx context.Context, t *task) error {
 		}
 	}
 
+	badMarkup := 0
 	for {
 		// Пауза и отмена — между шагами: шаг, начатый до нажатия, доделывается
 		if st := b.store.taskStatus(t.ID); st != "running" {
@@ -186,11 +187,17 @@ func (b *bot) execTask(ctx context.Context, t *task) error {
 		if err != nil {
 			return err
 		}
+		if len(out.ToolCalls) == 0 && !last && hasCallMarkup(out.Content) && badMarkup < maxMarkupRetries {
+			badMarkup++
+			t.Transcript = append(t.Transcript, out, chatMsg{Role: "user", Content: markupNudge})
+			continue
+		}
 		if len(out.ToolCalls) == 0 || last {
-			if strings.TrimSpace(out.Content) == "" {
+			result := stripCallMarkup(out.Content)
+			if result == "" {
 				return errBrainEmpty
 			}
-			return b.completeTask(ctx, t, out.Content)
+			return b.completeTask(ctx, t, result)
 		}
 		t.Transcript = append(t.Transcript, out)
 		parked, err := b.taskCalls(ctx, t, out.ToolCalls)

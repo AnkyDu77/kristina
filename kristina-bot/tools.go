@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -32,6 +33,8 @@ const (
 type tool struct {
 	spec  toolSpecFunc
 	modes int
+	// timeout — свой потолок вместо toolTimeout (сборка, установка зависимостей)
+	timeout time.Duration
 	// available — можно ли предлагать инструмент прямо сейчас (браузер
 	// живёт на GPU-машине: спит она — нет и браузера). nil — всегда.
 	available func() bool

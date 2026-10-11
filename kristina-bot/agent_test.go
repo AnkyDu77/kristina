@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -385,5 +387,53 @@ func TestToolSchemasAreStrict(t *testing.T) {
 		if err := strictSchema(back.Function.Parameters); err != nil {
 			t.Errorf("%s: %v", tl.spec.Name, err)
 		}
+	}
+}
+
+func TestAgentRetriesBrokenCallMarkup(t *testing.T) {
+	base, reqs := fakeLLM(t,
+		say("Сейчас посмотрю.\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {битый"),
+		func(t *testing.T, req llmRequest) map[string]any {
+			if last := req.Messages[len(req.Messages)-1]; last.Role != "user" || !strings.Contains(last.Content, "не распознался") {
+				t.Errorf("модель должна узнать, что вызов не разобрался: %+v", last)
+			}
+			return map[string]any{"content": "Файл на месте."}
+		},
+	)
+	b, sent := agentBot(t, base)
+	b.handle(context.Background(), 100, &chatState{}, incoming{from: 1, text: "проверь файл"})
+	if len(reqs()) != 2 {
+		t.Fatalf("ходов: %d", len(reqs()))
+	}
+	for _, s := range texts(sent()) {
+		if strings.Contains(s, "tool_call") {
+			t.Fatalf("разметка ушла владельцу: %q", s)
+		}
+	}
+	if got := texts(sent()); got[len(got)-1] != "Файл на месте." {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestAgentRunsQwenXMLCalls(t *testing.T) {
+	base, reqs := fakeLLM(t, say(qwenXMLCalls), say("Проверила три файла."))
+	b, _ := agentBot(t, base)
+	b.attach(testWorkspace(t), nil, nil)
+	b.handle(context.Background(), 100, &chatState{}, incoming{from: 1, text: "проверь компоненты"})
+	r := reqs()
+	if len(r) != 2 {
+		t.Fatalf("ходов: %d", len(r))
+	}
+	tools := 0
+	for _, m := range r[1].Messages {
+		if m.Role == "tool" {
+			tools++
+		}
+	}
+	if tools != 3 {
+		t.Fatalf("три XML-вызова должны выполниться, выполнено %d", tools)
+	}
+	if data, err := os.ReadFile(filepath.Join(b.ws.dir, "a.txt")); err != nil || string(data) != "  отступ сохраняется\n42" {
+		t.Fatalf("write_file из XML: %q, %v", data, err)
 	}
 }

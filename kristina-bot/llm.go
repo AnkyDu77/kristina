@@ -231,15 +231,36 @@ func (c *llmClient) post(ctx context.Context, base string, body map[string]any, 
 	return out, nil
 }
 
-// toolCallRe — вызов инструмента, оставшийся текстом. Qwen пишет его
-// тегами <tool_call>{...}</tool_call>; если сервер не распознал их (не тот
-// шаблон чата, модель сбилась), вызов приходит в content, а не в tool_calls.
-var toolCallRe = regexp.MustCompile(`(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>`)
+// Вызов инструмента, оставшийся текстом. Если сервер не распознал его (не
+// тот шаблон чата, модель сбилась), вызов приходит в content, а не в
+// tool_calls. Qwen пишет его в одном из двух видов:
+//
+//	<tool_call>{"name": "read_file", "arguments": {"path": "a.go"}}</tool_call>
+//
+//	<tool_call>
+//	<function=read_file>
+//	<parameter=path>
+//	a.go
+//	</parameter>
+//	</function>
+//	</tool_call>
+//
+// Второй — родной формат Qwen3-Coder и новых Qwen; LM Studio его иногда
+// пропускает, и раньше бот принимал такой ответ за финальный — работа
+// обрывалась на полуслове.
+var (
+	jsonCallRe  = regexp.MustCompile(`(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>`)
+	xmlCallRe   = regexp.MustCompile(`(?s)<function=([^>\s]+)>(.*?)(?:</function>|$)`)
+	xmlParamRe  = regexp.MustCompile(`(?s)<parameter=([^>\s]+)>(.*?)(?:</parameter>|$)`)
+	callWrapRe  = regexp.MustCompile(`(?s)</?tool_call>`)
+	xmlBlockRe  = regexp.MustCompile(`(?s)<function=[^>\s]+>.*?(?:</function>|$)`)
+	callMarkers = []string{"<tool_call", "<function="}
+)
 
 // textToolCalls достаёт такие вызовы из текста и возвращает текст без них.
 func textToolCalls(content string) (string, []toolCall) {
 	var calls []toolCall
-	for _, m := range toolCallRe.FindAllStringSubmatch(content, -1) {
+	for _, m := range jsonCallRe.FindAllStringSubmatch(content, -1) {
 		var c struct {
 			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
@@ -258,8 +279,35 @@ func textToolCalls(content string) (string, []toolCall) {
 		}
 		calls = append(calls, toolCall{Function: toolFunc{Name: c.Name, Arguments: args}})
 	}
+	rest := jsonCallRe.ReplaceAllString(content, "")
+
+	for _, m := range xmlCallRe.FindAllStringSubmatch(rest, -1) {
+		args := map[string]string{}
+		for _, p := range xmlParamRe.FindAllStringSubmatch(m[2], -1) {
+			// Значение — между переводами строк после тега и перед закрывающим.
+			// Убираем ровно по одному: содержимое write_file должно дойти
+			// байт в байт. Типы (числа, флаги) приводит lookupTool по схеме
+			v := strings.TrimPrefix(p[2], "\n")
+			v = strings.TrimSuffix(v, "\n")
+			args[p[1]] = v
+		}
+		raw, _ := json.Marshal(args)
+		calls = append(calls, toolCall{Function: toolFunc{Name: m[1], Arguments: string(raw)}})
+	}
 	if len(calls) == 0 {
 		return content, nil
 	}
-	return strings.TrimSpace(toolCallRe.ReplaceAllString(content, "")), calls
+	rest = xmlBlockRe.ReplaceAllString(rest, "")
+	return strings.TrimSpace(callWrapRe.ReplaceAllString(rest, "")), calls
+}
+
+// hasCallMarkup — в тексте осталась разметка вызова, которую не удалось
+// разобрать (оборвалась, кривая). Отдавать такое владельцу как ответ нельзя.
+func hasCallMarkup(content string) bool {
+	for _, m := range callMarkers {
+		if strings.Contains(content, m) {
+			return true
+		}
+	}
+	return false
 }

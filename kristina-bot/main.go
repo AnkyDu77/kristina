@@ -76,6 +76,9 @@ func main() {
 		browserEnabled:  envStr("KRISTINA_BROWSER", "1") != "0",
 		browserURL:      strings.TrimRight(os.Getenv("KRISTINA_BROWSER_URL"), "/"),
 		sandboxNetwork:  envStr("KRISTINA_SANDBOX_NETWORK", "none"),
+		sandboxInstall:  envStr("KRISTINA_SANDBOX_INSTALL_NETWORK", "bridge") != "none",
+		// сборка Next.js или холодный go build на одном vCPU — минуты
+		sandboxMaxTimeout: envDuration("KRISTINA_SANDBOX_MAX_TIMEOUT", 10*time.Minute),
 	}
 	if _, err := os.Stat(cfg.avatarPath); err != nil {
 		log.Fatalf("KRISTINA_AVATAR: %v", err)
@@ -242,8 +245,13 @@ func sandboxFromEnv(wsDir, network string) sandbox {
 		}
 	}
 	log.Printf("sandbox: %s, сеть %s, workspace %s", image, network, hostDir)
-	return &dockerSandbox{bin: bin, image: image, hostDir: hostDir, network: network,
-		memory: envStr("KRISTINA_SANDBOX_MEMORY", "1g"), cpus: envStr("KRISTINA_SANDBOX_CPUS", "1")}
+	installNet := envStr("KRISTINA_SANDBOX_INSTALL_NETWORK", "bridge")
+	if installNet == "none" {
+		installNet = ""
+	}
+	return &dockerSandbox{bin: bin, image: image, hostDir: hostDir, network: network, installNet: installNet,
+		memory: envStr("KRISTINA_SANDBOX_MEMORY", "1g"), swap: os.Getenv("KRISTINA_SANDBOX_MEMORY_SWAP"),
+		cpus: envStr("KRISTINA_SANDBOX_CPUS", "1")}
 }
 
 func envDuration(k string, def time.Duration) time.Duration {

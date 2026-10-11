@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -65,6 +66,7 @@ func (b *bot) think(ctx context.Context, msgs []chatMsg, tools []toolSpec) (chat
 func (b *bot) runAgent(ctx context.Context, chatID int64, msgs []chatMsg) (answer string, steps int, err error) {
 	prog := &progress{b: b, chatID: chatID}
 	budget := maxToolBudget
+	badMarkup := 0
 	for turn := 0; ; turn++ {
 		last := turn >= b.cfg.maxSteps || budget <= 0
 		tools := b.specs(inChat)
@@ -80,12 +82,18 @@ func (b *bot) runAgent(ctx context.Context, chatID int64, msgs []chatMsg) (answe
 		if err != nil {
 			return "", steps, err
 		}
+		if len(out.ToolCalls) == 0 && !last && hasCallMarkup(out.Content) && badMarkup < maxMarkupRetries {
+			badMarkup++
+			msgs = append(msgs, out, chatMsg{Role: "user", Content: markupNudge})
+			continue
+		}
 		if len(out.ToolCalls) == 0 || last {
-			if strings.TrimSpace(out.Content) == "" {
+			answer := stripCallMarkup(out.Content)
+			if answer == "" {
 				return "", steps, errBrainEmpty
 			}
 			prog.done(ctx)
-			return out.Content, steps, nil
+			return answer, steps, nil
 		}
 
 		msgs = append(msgs, out)
@@ -147,14 +155,80 @@ func (b *bot) lookupTool(tc toolCall) (*tool, json.RawMessage, string) {
 	if !json.Valid(args) {
 		return nil, nil, "ошибка: аргументы — не JSON"
 	}
-	return t, args, ""
+	return t, coerceArgs(t.spec.Parameters, args), ""
+}
+
+// coerceArgs приводит строковые значения к типам из схемы: из XML-вызова
+// все параметры приходят строками, да и в JSON модели пишут "5" вместо 5.
+// Строковые параметры не трогаем — содержимое файла должно дойти как есть.
+func coerceArgs(params map[string]any, args json.RawMessage) json.RawMessage {
+	var m map[string]any
+	if json.Unmarshal(args, &m) != nil {
+		return args
+	}
+	props, _ := params["properties"].(map[string]any)
+	changed := false
+	for k, v := range m {
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		p, _ := props[k].(map[string]any)
+		typ, _ := p["type"].(string)
+		s = strings.TrimSpace(s)
+		switch typ {
+		case "integer", "number":
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				m[k], changed = f, true
+			}
+		case "boolean":
+			if b, err := strconv.ParseBool(s); err == nil {
+				m[k], changed = b, true
+			}
+		case "array", "object":
+			var x any
+			if json.Unmarshal([]byte(s), &x) == nil {
+				m[k], changed = x, true
+			}
+		}
+	}
+	if !changed {
+		return args
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return args
+	}
+	return raw
+}
+
+// markupNudge — модель написала вызов инструмента текстом, и его не удалось
+// разобрать. Вместо того чтобы отдать владельцу полуфабрикат, просим
+// повторить вызов штатно.
+const markupNudge = "(Твой вызов инструмента пришёл текстом и не распознался. Повтори его штатным вызовом функции, без XML и тегов в тексте ответа. Если инструменты больше не нужны — просто ответь.)"
+
+// maxMarkupRetries — сколько раз переспрашиваем, прежде чем сдаться.
+const maxMarkupRetries = 2
+
+// stripCallMarkup — текст до первой нераспознанной разметки вызова.
+func stripCallMarkup(s string) string {
+	for _, m := range callMarkers {
+		if i := strings.Index(s, m); i >= 0 {
+			s = s[:i]
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 // execTool запускает инструмент (подтверждение, если нужно, уже получено)
 // и пишет журнал и квитанцию.
 func (b *bot) execTool(ctx context.Context, chatID int64, t *tool, name string, args json.RawMessage, actionID int64) string {
 	start := time.Now()
-	rctx, cancel := context.WithTimeout(ctx, toolTimeout)
+	limit := toolTimeout
+	if t.timeout > 0 {
+		limit = t.timeout
+	}
+	rctx, cancel := context.WithTimeout(ctx, limit)
 	res, err := t.run(rctx, chatID, args)
 	cancel()
 	errText := ""

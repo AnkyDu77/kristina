@@ -146,10 +146,22 @@ Headless Chromium ([Playwright MCP](https://github.com/microsoft/playwright-mcp)
   ни симлинк, созданный в песочнице, не выводят за пределы workspace
   (например, к `.env` бота).
 - `run_command`: `sh -c` в контейнере `kristina-sandbox` с той же
-  `/workspace` (python3, go, git, jq, ripgrep). Пользователь 1000 без
-  capabilities, корень только на чтение, `--network none`, 1 GB / 1 CPU /
-  256 процессов, 60 секунд на команду. Без сети подтверждать нечего; с
-  сетью (`KRISTINA_SANDBOX_NETWORK=bridge`) каждая команда идёт с ✅.
+  `/workspace`. Внутри Go 1.27 (с gcc для cgo, staticcheck, goimports,
+  golangci-lint), Node 22 + npm, python3, git, make, jq, ripgrep.
+  Пользователь 1000 без capabilities, корень только на чтение,
+  `--network none`, 1 GB / 1 CPU / 512 процессов. Потолок — 60 секунд, а
+  для сборки модель сама передаёт `timeout_sec` (до 10 минут). Кэши Go и
+  npm лежат в `/workspace/.cache` и переживают `/computer reset`.
+- `install_deps`: `npm ci`, `npm install …`, `go mod download`, `go mod
+  tidy`, `go get …`. Это **единственное место с интернетом**: одноразовый
+  контейнер с теми же ограничениями, но с сетью. Каждый вызов идёт с ✅.
+  Команда запускается без шелла и только из белого списка, так что
+  `npm ci; curl …` или `npm run build` с сетью не пройдут. Учти, что
+  пакеты при установке выполняют свои скрипты (postinstall), и в этот
+  момент у них есть интернет: подтверждай установку того, чему
+  доверяешь. Выключить: `KRISTINA_SANDBOX_INSTALL_NETWORK=none`.
+- Сборка Next.js съедает до 1–1,5 ГБ. На VPS с 2 ГБ дай песочнице своп:
+  `KRISTINA_SANDBOX_MEMORY_SWAP=2g` плюс своп на хосте.
 - Песочницу запускает бот через сокет докера. Сокет даёт root на хосте,
   но он у бота, а не у модели: та может только «выполни в песочнице».
   Без докера (или с `KRISTINA_SANDBOX=off`) файлы работают, а
