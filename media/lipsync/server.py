@@ -7,7 +7,9 @@
 
 Аватар — луп «молчащей» Кристины (mp4) или просто фото. С фото рот
 двигается на неподвижном лице: для первого теста годится, для жизни
-нужен луп с морганием и лёгким движением головы.
+нужен луп с морганием и лёгким движением головы. Бесшовную петлю (первый
+кадр ≈ последнему: сцены из Kling, idle.mp4) крутим по кругу, обычный
+ролик — пинг-понгом, вперёд-назад.
 
 Отличия от оригинального скрипта: нет input() на повторной подготовке
 (сервис не интерактивный), кадры без лица выбрасываются, а не ломают
@@ -50,6 +52,10 @@ OUT_SIDE = int(os.environ.get("LIPSYNC_OUT_SIDE", "512"))
 # Telegram не принимает кружки длиннее минуты
 MAX_SECONDS = float(os.environ.get("LIPSYNC_MAX_SECONDS", "59"))
 CACHE_DIR = os.environ.get("LIPSYNC_CACHE", "/cache/avatars")
+# Петля бесшовная, если первый и последний кадр почти совпадают: средняя
+# разница яркости в 0..255. Сцены из Kling (первый кадр = последний) дают
+# ~1–2, обычное видео — десятки
+SEAMLESS_DIFF = float(os.environ.get("LIPSYNC_SEAMLESS_DIFF", "6"))
 
 app = FastAPI(title="kristina-lipsync")
 _gpu = threading.Lock()
@@ -95,7 +101,15 @@ def _check_id(avatar_id: str) -> str:
 
 
 def _cache_path(avatar_id: str) -> str:
-    return os.path.join(CACHE_DIR, f"{avatar_id}.pt")
+    # v2: петли без пинг-понга — старый кэш с ним не подхватываем
+    return os.path.join(CACHE_DIR, f"{avatar_id}.v2.pt")
+
+
+def _seamless(first: str, last: str) -> bool:
+    """Склеивается ли конец ролика с началом без скачка."""
+    a, b = (cv2.resize(cv2.imread(p, cv2.IMREAD_GRAYSCALE), (128, 128),
+                       interpolation=cv2.INTER_AREA) for p in (first, last))
+    return float(np.mean(cv2.absdiff(a, b))) < SEAMLESS_DIFF
 
 
 def _get_avatar(avatar_id: str):
@@ -125,6 +139,11 @@ def _prepare(avatar_id: str, src: str):
         imgs = sorted(os.path.join(work, f) for f in os.listdir(work) if f.endswith(".png"))
         if not imgs:
             raise HTTPException(400, "no frames decoded")
+        # Бесшовную петлю крутим по кругу: обратный ход на ней виден
+        # (пар идёт в кружку) и удваивает длину. Последний кадр не
+        # выкидываем: у Kling это копия первого (лишние 40 мс на стыке не
+        # видно), а у idle.mp4 из make_idle.py — соседний с первым кадр
+        loop = len(imgs) > 1 and _seamless(imgs[0], imgs[-1])
 
         coords, frames = get_landmark_and_bbox(imgs, 0)
         vae = _m["vae"]
@@ -141,10 +160,13 @@ def _prepare(avatar_id: str, src: str):
         if not kept_frames:
             raise HTTPException(400, "no face found in avatar")
 
-        # Пинг-понг: луп идёт вперёд и назад, и на стыке нет скачка
-        frames_c = kept_frames + kept_frames[::-1]
-        coords_c = kept_coords + kept_coords[::-1]
-        latents_c = latents + latents[::-1]
+        if loop:
+            frames_c, coords_c, latents_c = kept_frames, kept_coords, latents
+        else:
+            # Пинг-понг: обычный ролик идёт вперёд и назад, и на стыке нет скачка
+            frames_c = kept_frames + kept_frames[::-1]
+            coords_c = kept_coords + kept_coords[::-1]
+            latents_c = latents + latents[::-1]
         masks, mask_boxes = [], []
         for frame, box in zip(frames_c, coords_c):
             mask, crop_box = get_image_prepare_material(frame, box, fp=_m["fp"], mode="jaw")
@@ -155,6 +177,7 @@ def _prepare(avatar_id: str, src: str):
                   masks=masks, mask_boxes=mask_boxes)
         torch.save(dict(av, latents=[l.cpu() for l in latents_c]), _cache_path(avatar_id))
         _avatars[avatar_id] = av
+        print(f"avatar {avatar_id}: {len(frames_c)} frames, {'loop' if loop else 'ping-pong'}", flush=True)
         return av
     finally:
         shutil.rmtree(work, ignore_errors=True)
