@@ -851,8 +851,14 @@ func (b *bot) wake(ctx context.Context, chatID int64) {
 		defer cancel()
 		if err := b.gpu.waitRunning(wctx); err != nil {
 			msg := "Видеокарта не поднялась: " + err.Error()
-			if tail := lastLines(b.gpu.logTail(), 15); tail != "" {
+			// С логом установки хвост терраформа — лишь «provisioner error»
+			if tail := lastLines(b.gpu.logTail(), 15); tail != "" && !strings.Contains(msg, "Лог установки") {
 				msg += "\n\n" + tail
+			}
+			// Длиннее 4096 Telegram не примет, и владелец не узнает ничего.
+			// Режем начало: причина — в конце лога
+			if r := []rune(msg); len(r) > 4000 {
+				msg = "…" + string(r[len(r)-3990:])
 			}
 			_ = b.tg.sendPlain(ctx, chatID, msg)
 			return

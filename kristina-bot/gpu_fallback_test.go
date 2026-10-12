@@ -226,3 +226,40 @@ vps_flavor_id        = "0000"
 		t.Fatal("без всех кредов — ошибка, а не клиент-пустышка")
 	}
 }
+
+// Упала установка на машине: бот забирает её лог по ssh из output
+// ssh_command — тем же ключом, что у терраформа
+func TestApplyProvisionerErrorFetchesSetupLog(t *testing.T) {
+	dir := t.TempDir()
+	tf := filepath.Join(dir, "terraform")
+	if err := os.WriteFile(tf, []byte(`#!/bin/bash
+case "$1" in
+apply) echo 'Error: remote-exec provisioner error'; exit 1;;
+output) echo '{"ssh_command":{"value":"ssh -i ~/.ssh/selectel root@90.1.2.3","sensitive":true}}';;
+esac
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ssh := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(ssh, []byte(`#!/bin/bash
+echo "$*" > "$(dirname "$0")/ssh-args"
+echo '=== kristina-lipsync-base:f84 — из кэша ==='
+echo ...
+echo 'short read: expected 1378857050 bytes but got 581979136: unexpected EOF'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", "/root")
+	m, _ := fallbackManager(tf, dir, "")
+	m.sshBin = ssh
+	m.runOp("apply")
+
+	st := m.status()
+	if st.State != "error" || !strings.Contains(st.Err, "Лог установки на GPU") || !strings.Contains(st.Err, "short read") {
+		t.Fatalf("статус: %+v", st)
+	}
+	args, _ := os.ReadFile(filepath.Join(dir, "ssh-args"))
+	if !strings.HasPrefix(string(args), "-i /root/.ssh/selectel ") || !strings.Contains(string(args), "-o BatchMode=yes") || !strings.Contains(string(args), "root@90.1.2.3 f=/root/setup_kristina.log") {
+		t.Fatalf("ssh: %s", args)
+	}
+}

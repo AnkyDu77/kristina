@@ -231,6 +231,23 @@ resource "local_file" "setup_script" {
   unzip -q -o /root/awscliv2.zip -d /root
   /root/aws/install --update
   rm -rf /root/aws /root/awscliv2.zip
+  # Selectel S3 рвёт крупные GET на полпути («An error occurred () when
+  # calling the GetObject operation», 2026-10-12 — веса TTS и база lipsync
+  # разом). Меньше параллельных кусков, больше повторов, а CRC-проверки
+  # свежего AWS CLI — только там, где их требует сам S3
+  export AWS_RETRY_MODE=adaptive AWS_MAX_ATTEMPTS=10
+  export AWS_REQUEST_CHECKSUM_CALCULATION=when_required AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
+  aws configure set default.s3.max_concurrent_requests 4
+  # Обрыв посреди файла AWS CLI не докачивает — повторяем всю команду
+  s3_retry() {
+    local i
+    for i in 1 2 3; do
+      "$@" && return 0
+      echo "!!! S3, попытка $i из 3 не удалась: $*"
+      sleep 15
+    done
+    return 1
+  }
 
   echo "=== Installing NVIDIA Container Toolkit ==="
   # Драйвер уже в образе Selectel; контейнерам нужен только мост к нему
@@ -254,7 +271,8 @@ resource "local_file" "setup_script" {
 
   echo "=== Weights from S3 cache ==="
   mkdir -p ${local.weights_dir}/hf ${local.weights_dir}/qwen3-tts ${local.weights_dir}/musetalk ${local.root_dir}/cache
-  aws s3 sync "$CACHE/weights" ${local.weights_dir} $S3 $Q || echo "кэша весов нет — скачаем с HuggingFace"
+  # sync докачивает только недостающее — повтор не начинает с нуля
+  s3_retry aws s3 sync "$CACHE/weights" ${local.weights_dir} $S3 $Q || echo "кэша весов нет — скачаем с HuggingFace"
 
   cd ${local.root_dir}/media
   cat > .env <<ENV
@@ -276,17 +294,27 @@ resource "local_file" "setup_script" {
       # Повторный apply на той же машине — база уже загружена, не тянем
       # десять гигабайт из S3 заново
       echo "=== $img — уже на машине ==="
-    elif aws s3 ls "$key" $S3 > /dev/null 2>&1; then
+      return
+    fi
+    if aws s3 ls "$key" $S3 > /dev/null 2>&1; then
       echo "=== $img — из кэша ==="
-      aws s3 cp "$key" - $S3 $Q | zstd -d | docker load
-    else
-      echo "=== $img — собираем (в кэше нет; lipsync — 20–40 минут) ==="
-      # plain — чтобы при сбое в логе была сама ошибка, а не свёрнутый прогресс
-      docker build --progress=plain -t "$img" "$svc/base"
-      if [ "$WRITE_CACHE" = "true" ]; then
-        docker save "$img" | zstd -T0 -3 | aws s3 cp - "$key" $S3 $Q \
-          || echo "!!! база $svc не уехала в кэш — в следующий раз соберётся заново"
+      # Сначала на диск, потом в docker: обрыв посреди потока
+      # (aws s3 cp - | docker load) ронял весь подъём, а файл можно
+      # скачать ещё раз
+      local tmp="${local.root_dir}/cache/$svc-base.tar.zst"
+      if s3_retry aws s3 cp "$key" "$tmp" $S3 $Q && zstd -dc "$tmp" | docker load; then
+        rm -f "$tmp"
+        return
       fi
+      rm -f "$tmp"
+      echo "!!! $img из кэша не загрузился — собираем сами"
+    fi
+    echo "=== $img — собираем (lipsync — 20–40 минут) ==="
+    # plain — чтобы при сбое в логе была сама ошибка, а не свёрнутый прогресс
+    docker build --progress=plain -t "$img" "$svc/base"
+    if [ "$WRITE_CACHE" = "true" ]; then
+      docker save "$img" | zstd -T0 -3 | aws s3 cp - "$key" $S3 $Q \
+        || echo "!!! база $svc не уехала в кэш — в следующий раз соберётся заново"
     fi
   }
   load_or_build_base tts ${local.tts_base_tag}
@@ -380,7 +408,7 @@ resource "local_file" "setup_script" {
     echo "=== LLM: ${var.llm_model_path} из S3 ==="
     MODEL_DIR="/root/.lmstudio/models/${var.llm_model_path}"
     mkdir -p "$MODEL_DIR"
-    aws s3 sync "${var.llm_models_uri}/${var.llm_model_path}" "$MODEL_DIR" $S3 $Q
+    s3_retry aws s3 sync "${var.llm_models_uri}/${var.llm_model_path}" "$MODEL_DIR" $S3 $Q
 
     # Модели нет в S3 — качаем с Hugging Face сами и кладём в S3: следующий
     # подъём возьмёт её оттуда (та же схема, что с базами образов). Заранее,
@@ -431,9 +459,13 @@ resource "local_file" "setup_script" {
     BIMG="${var.browser_image}"
     BKEY="$CACHE/images/$(echo "$BIMG" | tr '/:@' '___').tar.zst"
     if ! docker image inspect "$BIMG" > /dev/null 2>&1; then
-      if aws s3 ls "$BKEY" $S3 > /dev/null 2>&1; then
-        aws s3 cp "$BKEY" - $S3 $Q | zstd -d | docker load
+      BTMP="${local.root_dir}/cache/browser.tar.zst"
+      if aws s3 ls "$BKEY" $S3 > /dev/null 2>&1 \
+        && s3_retry aws s3 cp "$BKEY" "$BTMP" $S3 $Q && zstd -dc "$BTMP" | docker load; then
+        rm -f "$BTMP"
       else
+        # В кэше нет или не скачался — берём из реестра
+        rm -f "$BTMP"
         docker pull "$BIMG"
         if [ "$WRITE_CACHE" = "true" ]; then
           docker save "$BIMG" | zstd -T0 -3 | aws s3 cp - "$BKEY" $S3 $Q \

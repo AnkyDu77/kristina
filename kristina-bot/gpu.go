@@ -14,6 +14,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +51,8 @@ type gpuManager struct {
 	ondemandFallback bool
 	fault            func(id string) (string, error)
 	onDemand         bool // поднят обычный (непрерываемый) сервер — дороже
+
+	sshBin string // "" — ssh из PATH; в тестах подменяется
 }
 
 // instanceAddr — ресурс сервера в terraform: запасной путь пересоздаёт
@@ -312,6 +316,15 @@ func (m *gpuManager) runOp(verb string) {
 		}
 	}
 
+	// Упала установка на самой машине: терраформ пишет только «provisioner
+	// error», причина — в логе на GPU, а сторож скоро погасит её вместе с
+	// логом. Забираем его, пока машина жива
+	if err != nil && verb == "apply" && strings.Contains(out, "provisioner error") {
+		if lg := m.setupLog(); lg != "" {
+			err = fmt.Errorf("%w\n\nЛог установки на GPU:\n%s", err, lg)
+		}
+	}
+
 	var ep string
 	if err == nil && verb == "apply" {
 		outs, oerr := m.readOutputs()
@@ -341,6 +354,58 @@ func (m *gpuManager) runOp(verb string) {
 	}
 	m.state = "absent"
 	log.Printf("gpu: VPS уничтожена")
+}
+
+// setupLogCmd — шаги установки и хвост её лога (его пишет setup_kristina.sh)
+const setupLogCmd = `f=/root/setup_kristina.log; [ -f $f ] || exit 0; ` +
+	`grep '^===\|!!!' $f | tail -n 4; echo ...; tail -n 12 $f`
+
+var sshCommandRe = regexp.MustCompile(`^ssh -i (\S+) root@(\S+)$`)
+
+// setupLog — хвост лога установки с GPU-машины; "" — если не достали.
+// Ключ и IP — из output ssh_command, теми же терраформ сам провижинит.
+func (m *gpuManager) setupLog() string {
+	outs, err := m.readOutputs()
+	if err != nil {
+		log.Printf("gpu: лог установки: outputs: %v", err)
+		return ""
+	}
+	sm := sshCommandRe.FindStringSubmatch(outs["ssh_command"])
+	if sm == nil {
+		log.Printf("gpu: лог установки: нет ssh_command в outputs")
+		return ""
+	}
+	key := sm[1]
+	if rest, ok := strings.CutPrefix(key, "~/"); ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			key = filepath.Join(home, rest)
+		}
+	}
+	bin := m.sshBin
+	if bin == "" {
+		bin = "ssh"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// Машина каждый раз новая, ключ хоста тоже — known_hosts не ведём
+	// (терраформ его тоже не сверяет)
+	raw, err := exec.CommandContext(ctx, bin, "-i", key,
+		"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
+		"-o", "ConnectTimeout=10", "root@"+sm[2], setupLogCmd).Output()
+	if err != nil {
+		log.Printf("gpu: лог установки: ssh: %v", err)
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	for i, l := range lines {
+		log.Printf("gpu-setup: %s", l)
+		// apt и docker пишут строки на полэкрана — в Telegram хватит начала
+		if r := []rune(l); len(r) > 240 {
+			lines[i] = string(r[:240]) + "…"
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *gpuManager) readOutputs() (map[string]string, error) {
