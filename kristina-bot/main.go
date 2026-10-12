@@ -124,6 +124,18 @@ func main() {
 			log.Fatalf("KRISTINA_GPU_IDLE: %v", err)
 		}
 		gpu = newGPUManager(tfBin, tfDir, idle)
+		// Прерываемой карты нет — поднять обычную (дороже). Причину отказа
+		// читаем у Selectel по кредам терраформа: сам он её не пишет
+		gpu.ondemandFallback = envStr("KRISTINA_GPU_ONDEMAND_FALLBACK", "1") != "0"
+		if nova, err := novaFromTFVars(filepath.Join(tfDir, "terraform.tfvars")); err != nil {
+			log.Printf("gpu: причину отказа Selectel узнать не смогу (%v) — ERROR сервера сочту нехваткой карт", err)
+		} else {
+			gpu.fault = func(id string) (string, error) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				return nova.serverFault(ctx, id)
+			}
+		}
 		gpu.syncFromState()
 		log.Printf("gpu: managed-режим, %s, авто-стоп после %s простоя", tfDir, idle)
 	} else {

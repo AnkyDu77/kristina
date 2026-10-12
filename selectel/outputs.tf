@@ -33,3 +33,8 @@ output "base_tags" {
   description = "Теги баз образов (хэши media/<svc>/base/) — по ним ищется кэш в S3"
   value       = { tts = local.tts_base_tag, lipsync = local.lipsync_base_tag }
 }
+
+output "preemptible" {
+  description = "Какой сервер поднят: \"true\" — прерываемый, \"false\" — обычный (запасной путь, дороже). Строкой: бот читает outputs как строки"
+  value       = var.preemptible ? "true" : "false"
+}

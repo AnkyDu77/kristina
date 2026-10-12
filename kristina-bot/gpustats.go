@@ -222,6 +222,9 @@ func (b *bot) gpuReport(ctx context.Context, full bool) (string, error) {
 	if b.gpu != nil {
 		st := b.gpu.status()
 		text += fmt.Sprintf("\nМашина работает %s, авто-стоп через %s", st.Up.Round(time.Minute), st.IdleLeft.Round(time.Minute))
+		if st.OnDemand {
+			text += "\nТип: обычная, не прерываемая (прерываемых не было) — дороже"
+		}
 	}
 	return text, nil
 }

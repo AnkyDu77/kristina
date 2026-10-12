@@ -164,15 +164,21 @@ resource "openstack_compute_instance_v2" "kristina_vps" {
     uuid                  = openstack_blockstorage_volume_v3.disk.id
     source_type           = "volume"
     destination_type      = "volume"
-    boot_index            = 0
-    delete_on_termination = true
+    boot_index = 0
+    # Диск переживает пересоздание сервера. Нужно для запасного подъёма:
+    # прерываемой карты нет → бот пересоздаёт ТОЛЬКО сервер (обычным,
+    # -replace), а сеть, IP и уже развёрнутый диск остаются. Удаляет диск
+    # terraform destroy — как отдельный ресурс
+    delete_on_termination = false
   }
 
   vendor_options {
     ignore_resize_confirmation = true
   }
 
-  tags = ["preemptible", "--os-compute-api-version 2.72"]
+  # Прерываемый — дешевле, но Selectel выдаёт его, только когда есть
+  # свободные карты. Нет — бот повторяет apply с preemptible = false
+  tags = var.preemptible ? ["preemptible", "--os-compute-api-version 2.72"] : ["--os-compute-api-version 2.72"]
 }
 
 resource "openstack_networking_floatingip_associate_v2" "ip_association" {

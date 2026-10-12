@@ -256,3 +256,14 @@ variable "browser_image" {
   type        = string
   default     = "mcr.microsoft.com/playwright/mcp:latest"
 }
+
+variable "preemptible" {
+  description = <<-EOT
+    Прерываемый сервер: заметно дешевле, но Selectel выдаёт его, только когда
+    в пуле есть свободные карты (и может забрать). Бот сначала пробует
+    прерываемый, а если Selectel ответил «нет ресурсов» — повторяет apply с
+    false, пересоздавая только сервер (KRISTINA_GPU_ONDEMAND_FALLBACK).
+  EOT
+  type        = bool
+  default     = true
+}

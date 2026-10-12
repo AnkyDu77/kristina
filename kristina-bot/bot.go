@@ -91,6 +91,8 @@ type bot struct {
 	chats   map[int64]*chatState
 	waiting map[int64]chan bool // id подтверждения → ждущий агент
 	waking  bool                // уже ждём подъёма машины — второй раз не будим
+	// wakeChat — кто будил: туда — новости подъёма (запасной путь и т.п.)
+	wakeChat int64
 	// hintedPrivacy — чаты, которым уже объяснили, почему кружок пришёл
 	// обычным видео
 	hintedPrivacy map[int64]bool
@@ -160,6 +162,14 @@ func (b *bot) run(ctx context.Context) error {
 	log.Printf("bot: @%s слушает", me.Username)
 
 	if b.gpu != nil {
+		b.gpu.setNotify(func(msg string) {
+			b.mu.Lock()
+			chatID := b.wakeChat
+			b.mu.Unlock()
+			if chatID != 0 {
+				_ = b.tg.sendPlain(ctx, chatID, msg)
+			}
+		})
 		b.gpu.setOnReady(func() {
 			b.probeBrowser(ctx) // до ответов: пусть браузер уже будет в инструментах
 			b.drainInbox(ctx)
@@ -819,7 +829,7 @@ func (b *bot) wake(ctx context.Context, chatID int64) {
 		b.mu.Unlock()
 		return
 	}
-	b.waking = true
+	b.waking, b.wakeChat = true, chatID
 	b.mu.Unlock()
 
 	if err := b.gpu.start(); err != nil && b.gpu.status().State != "provisioning" {
@@ -848,6 +858,9 @@ func (b *bot) wake(ctx context.Context, chatID int64) {
 			return
 		}
 		msg := "Видеокарта готова."
+		if b.gpu.status().OnDemand {
+			msg = "Видеокарта готова — обычная, не прерываемая (дороже). Гаснет по простою, как всегда."
+		}
 		if n := b.store.countInbox(chatID); n > 0 {
 			msg += fmt.Sprintf(" Отвечаю на отложенное (%d).", n)
 		}
@@ -871,7 +884,11 @@ func (b *bot) statusText(chatID int64, cs *chatState) string {
 		fmt.Fprintf(&sb, "Медиа-API: %s (статически)\n", b.cfg.staticBase)
 	} else {
 		st := b.gpu.status()
-		fmt.Fprintf(&sb, "Видеокарта: %s\n", st.State)
+		fmt.Fprintf(&sb, "Видеокарта: %s", st.State)
+		if st.State == "running" && st.OnDemand {
+			sb.WriteString(" (обычная, не прерываемая — дороже)")
+		}
+		sb.WriteString("\n")
 		if st.State == "running" {
 			fmt.Fprintf(&sb, "  работает %s, авто-стоп через %s\n", st.Up.Round(time.Minute), st.IdleLeft.Round(time.Minute))
 		}

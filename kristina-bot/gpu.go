@@ -41,6 +41,33 @@ type gpuManager struct {
 	tail         []string // последние строки terraform — для отчёта об ошибке
 	// onReady — машина поднялась: бот отвечает на отложенные вопросы
 	onReady func()
+	// notify — сказать владельцу по ходу подъёма (запасной путь и т.п.)
+	notify func(string)
+
+	// Запасной путь: прерываемой карты нет → повторить apply обычным
+	// сервером. fault — почему сервер ушёл в ERROR (из API Selectel)
+	ondemandFallback bool
+	fault            func(id string) (string, error)
+	onDemand         bool // поднят обычный (непрерываемый) сервер — дороже
+}
+
+// instanceAddr — ресурс сервера в terraform: запасной путь пересоздаёт
+// только его (-replace), а сеть, IP и диск остаются как есть.
+const instanceAddr = "openstack_compute_instance_v2.kristina_vps"
+
+func (m *gpuManager) say(msg string) {
+	m.mu.Lock()
+	f := m.notify
+	m.mu.Unlock()
+	if f != nil {
+		f(msg)
+	}
+}
+
+func (m *gpuManager) setNotify(f func(string)) {
+	m.mu.Lock()
+	m.notify = f
+	m.mu.Unlock()
 }
 
 func (m *gpuManager) setOnReady(f func()) {
@@ -64,6 +91,7 @@ func (m *gpuManager) syncFromState() bool {
 	}
 	m.mu.Lock()
 	m.state, m.endpoint = "running", outs["media_endpoint"]
+	m.onDemand = outs["preemptible"] == "false"
 	m.since, m.lastActivity = time.Now(), time.Now()
 	m.mu.Unlock()
 	log.Printf("gpu: подхвачена работающая VPS из terraform state: %s", outs["media_endpoint"])
@@ -72,6 +100,7 @@ func (m *gpuManager) syncFromState() bool {
 
 type gpuStatus struct {
 	State    string
+	OnDemand bool // обычный сервер вместо прерываемого
 	Endpoint string
 	Up       time.Duration
 	IdleLeft time.Duration
@@ -81,7 +110,7 @@ type gpuStatus struct {
 func (m *gpuManager) status() gpuStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	st := gpuStatus{State: m.state, Endpoint: m.endpoint, Err: m.errMsg}
+	st := gpuStatus{State: m.state, Endpoint: m.endpoint, Err: m.errMsg, OnDemand: m.onDemand}
 	if m.state == "running" {
 		st.Up = time.Since(m.since)
 		st.IdleLeft = max(0, m.idleTimeout-time.Since(m.lastActivity))
@@ -212,8 +241,10 @@ func (m *gpuManager) tfCmd(args ...string) *exec.Cmd {
 
 // runTF выполняет terraform, отдавая вывод и в лог процесса (apply идёт
 // десятки минут — пусть будет видно, на чём он), и в хвост для отчёта.
-func (m *gpuManager) runTF(args []string) error {
+// Возвращает и весь вывод: по нему решаем, не нехватка ли это карт.
+func (m *gpuManager) runTF(args []string) (string, error) {
 	cmd := m.tfCmd(args...)
+	var out strings.Builder
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw
 
@@ -225,13 +256,16 @@ func (m *gpuManager) runTF(args []string) error {
 		for sc.Scan() {
 			log.Printf("tf: %s", sc.Text())
 			m.appendLog(sc.Text())
+			if out.Len() < 4<<20 {
+				out.WriteString(sc.Text() + "\n")
+			}
 		}
 	}()
 
 	err := cmd.Run()
 	pw.Close()
 	<-done
-	return err
+	return out.String(), err
 }
 
 func (m *gpuManager) runOp(verb string) {
@@ -244,13 +278,37 @@ func (m *gpuManager) runOp(verb string) {
 		attempts = destroyAttempts
 	}
 	var err error
+	var out string
+	onDemand := false
 	for i := 1; i <= attempts; i++ {
-		if err = m.runTF(args); err == nil {
+		if out, err = m.runTF(args); err == nil {
 			break
 		}
 		if i < attempts {
 			log.Printf("gpu: destroy, попытка %d из %d: %v — повтор через %s", i, attempts, err, destroyRetryDelay)
 			time.Sleep(destroyRetryDelay)
+		}
+	}
+
+	// Двухстадийный подъём: прерываемой карты нет — пересоздаём только
+	// сервер, обычным. Остальное (сеть, IP, диск) уже создано первым заходом
+	// и остаётся. Причину берём у самого Selectel: терраформ её не пишет
+	if err != nil && verb == "apply" {
+		capacity, why := capacityVerdict(out, m.fault)
+		switch {
+		case capacity && m.ondemandFallback:
+			log.Printf("gpu: прерываемой карты нет (%s) — поднимаю обычный сервер", why)
+			m.say(fmt.Sprintf("Прерываемой карты у Selectel сейчас нет (%s). Поднимаю обычную — она дороже, зато будет; "+
+				"гаснет по простою так же.", why))
+			out, err = m.runTF(append(args, "-var", "preemptible=false", "-replace="+instanceAddr))
+			onDemand = err == nil
+			if err != nil {
+				if again, why2 := capacityVerdict(out, m.fault); again {
+					err = fmt.Errorf("у Selectel нет свободных карт этого типа — ни прерываемых, ни обычных (%s)", why2)
+				}
+			}
+		case why != "":
+			err = fmt.Errorf("%w; причина: %s", err, why)
 		}
 	}
 
@@ -273,7 +331,7 @@ func (m *gpuManager) runOp(verb string) {
 		return
 	}
 	if verb == "apply" {
-		m.state, m.endpoint = "running", ep
+		m.state, m.endpoint, m.onDemand = "running", ep, onDemand
 		m.since, m.lastActivity = time.Now(), time.Now()
 		log.Printf("gpu: VPS готова: %s", ep)
 		if m.onReady != nil {
