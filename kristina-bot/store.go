@@ -42,7 +42,12 @@ func openStore(path string) (*store, error) {
 			return nil, fmt.Errorf("migrate %q: %w", m, err)
 		}
 	}
-	return &store{db: db}, nil
+	s := &store{db: db}
+	if err := s.initRecall(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("recall index: %w", err)
+	}
+	return s, nil
 }
 
 var migrations = []string{

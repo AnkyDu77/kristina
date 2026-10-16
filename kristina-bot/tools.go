@@ -125,6 +125,21 @@ func (b *bot) buildTools() {
 				return "Забыла.", nil
 			},
 		},
+		{
+			spec: toolSpecFunc{
+				Name: "recall",
+				Description: "Поиск по вашему прошлому: старые реплики, которых уже нет в истории, и фоновые задачи (цель и журнал). " +
+					"query — ключевые слова от трёх букв (имена, термины, названия), а не фраза целиком. Ищет по словам, а не по смыслу: " +
+					"не нашлось — попробуй синонимы.",
+				Parameters: object(map[string]any{
+					"query": str("ключевые слова через пробел"),
+					"limit": map[string]any{"type": "integer", "description": "сколько фрагментов вернуть, 1–10 (по умолчанию 6)"},
+				}, "query"),
+			},
+			modes:  everywhere,
+			status: func(a json.RawMessage) string { return "🗂 Вспоминаю: " + argStr(a, "query") },
+			run:    b.toolRecall,
+		},
 	}
 	tools = append(tools, b.skillTools()...)
 	tools = append(tools, b.taskTools()...)
@@ -132,6 +147,31 @@ func (b *bot) buildTools() {
 	tools = append(tools, b.gpuTools()...)
 
 	b.registerTools(tools)
+}
+
+func (b *bot) toolRecall(ctx context.Context, chatID int64, a json.RawMessage) (string, error) {
+	o := recallOpts{limit: min(max(int(argInt(a, "limit")), 0), 10)}
+	if t := taskFrom(ctx); t != nil {
+		o.skipTask = t.ID
+	} else {
+		o.skipFrom = b.store.visibleFrom(chatID, 2*b.cfg.historyTurns)
+	}
+	hits, err := b.store.recall(chatID, argStr(a, "query"), o)
+	if err != nil {
+		return "", err
+	}
+	if len(hits) == 0 {
+		return "Ничего не нашлось.", nil
+	}
+	var sb strings.Builder
+	for _, h := range hits {
+		who := map[string]string{"user": "владелец", "assistant": "ты"}[h.Kind]
+		if h.Kind == "task" {
+			who = fmt.Sprintf("задача #%d", h.ID)
+		}
+		fmt.Fprintf(&sb, "[%s · %s]\n%s\n\n", h.At.In(b.cfg.tz).Format("2006-01-02 15:04"), who, h.Excerpt)
+	}
+	return truncRunes(strings.TrimSpace(sb.String()), maxToolResult), nil
 }
 
 // registerTools добавляет инструменты или заменяет одноимённые. Реестр
