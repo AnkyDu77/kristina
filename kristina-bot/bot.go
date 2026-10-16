@@ -86,6 +86,7 @@ type bot struct {
 	sandbox    sandbox    // nil — докера нет, команд нет (файлы при этом работают)
 	ws         *workspace // nil — без рабочей папки
 	mcpServers []*mcpServer
+	hf         *higgsfield // nil — генерации выключены (нет CLI)
 
 	mu      sync.Mutex
 	chats   map[int64]*chatState
@@ -149,6 +150,13 @@ func (b *bot) attach(ws *workspace, sb sandbox, servers []*mcpServer) {
 	b.ws, b.sandbox, b.mcpServers = ws, sb, servers
 	b.registerTools(b.fileTools())
 	b.registerTools(b.computerTools())
+	b.registerTools(b.photoTools())
+}
+
+// attachHiggsfield включает генерации фото и видео (higgsfield.go).
+func (b *bot) attachHiggsfield(h *higgsfield) {
+	b.hf = h
+	b.registerTools(b.hfTools())
 }
 
 func (b *bot) run(ctx context.Context) error {
@@ -186,6 +194,9 @@ func (b *bot) run(ctx context.Context) error {
 	}
 	go b.tasks.loop(ctx)
 	go b.monitorLoop(ctx)
+	if b.hf != nil {
+		go b.hfLoop(ctx)
+	}
 
 	var offset int64
 	for ctx.Err() == nil {

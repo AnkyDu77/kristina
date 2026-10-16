@@ -332,6 +332,15 @@ func (b *bot) taskCalls(ctx context.Context, t *task, calls []toolCall) (parked 
 		if name == "ask_user" {
 			return true, b.parkInput(ctx, t, calls[i:], args)
 		}
+		if name == "hf_wait" {
+			parked, res, err := b.parkHFWait(ctx, t, calls[i:])
+			if parked || err != nil {
+				return parked, err
+			}
+			t.Steps++
+			reply(tc, res)
+			continue
+		}
 		if tl.confirm != nil {
 			summary, err := tl.confirm(t.ChatID, args)
 			if err != nil {
@@ -405,6 +414,9 @@ func (b *bot) park(t *task) error {
 func (b *bot) resolvePending(ctx context.Context, t *task, p *pendingCall) string {
 	if p.Kind == "input" {
 		return "Владелец ответил: " + p.Answer
+	}
+	if p.Kind == "hf_wait" {
+		return p.Answer
 	}
 	if p.Decision != "approved" {
 		return rejectedResult
@@ -490,6 +502,8 @@ func (b *bot) cardText(t *task) string {
 			sb.WriteString("🤚 Жду подтверждения: " + truncRunes(t.Pending.Summary, 200))
 		} else if t.Pending != nil && t.Pending.Kind == "checkin" {
 			sb.WriteString("🧭 Жду решения: продолжать?")
+		} else if t.Pending != nil && t.Pending.Kind == "hf_wait" {
+			sb.WriteString("⏳ Жду генерацию в Higgsfield — видеокарту не держу")
 		} else {
 			sb.WriteString("❓ Жду твоего ответа")
 		}

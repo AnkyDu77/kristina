@@ -168,6 +168,28 @@ CREATE TABLE IF NOT EXISTS monitors (
     deleted_at  TIMESTAMP
 );
 
+-- Генерации Higgsfield (higgsfield.go). Время — unix-секунды, как у
+-- мониторов. cost — смета на момент заказа; упавшие (failed) Higgsfield
+-- возвращает, в траты месяца они не идут.
+CREATE TABLE IF NOT EXISTS hf_jobs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id     TEXT NOT NULL UNIQUE,
+    chat_id    INTEGER NOT NULL,
+    task_id    INTEGER NOT NULL DEFAULT 0,
+    model      TEXT NOT NULL,
+    prompt     TEXT NOT NULL DEFAULT '',
+    name       TEXT NOT NULL DEFAULT '',
+    cost       REAL NOT NULL DEFAULT 0,
+    status     TEXT NOT NULL DEFAULT 'pending', -- pending | done | failed
+    hf_status  TEXT NOT NULL DEFAULT '',
+    file       TEXT NOT NULL DEFAULT '',
+    error      TEXT NOT NULL DEFAULT '',
+    reported   INTEGER NOT NULL DEFAULT 0,      -- результат отдан задаче (hf_wait)
+    created_at INTEGER NOT NULL,
+    done_at    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS hf_jobs_status ON hf_jobs(status);
+
 -- Настройки чатов и прочие мелочи (кружки вкл/выкл, id сессии поиска).
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,

@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -269,6 +270,69 @@ func (a *tgAPI) sendPhoto(ctx context.Context, chatID int64, data []byte, captio
 		"chat_id": fmt.Sprint(chatID),
 		"caption": caption,
 	})
+}
+
+// sendPhotoNamed — фото со своим именем файла (по нему видно, что это за кадр).
+func (a *tgAPI) sendPhotoNamed(ctx context.Context, chatID int64, name string, data []byte, caption string) error {
+	return a.sendFile(ctx, "sendPhoto", "photo", name, data, map[string]string{
+		"chat_id": fmt.Sprint(chatID),
+		"caption": caption,
+	})
+}
+
+// sendVideoFile — видео как есть (вертикальный рилс): размеры телеграм
+// возьмёт из файла.
+func (a *tgAPI) sendVideoFile(ctx context.Context, chatID int64, name string, data []byte, caption string) error {
+	return a.sendFile(ctx, "sendVideo", "video", name, data, map[string]string{
+		"chat_id":            fmt.Sprint(chatID),
+		"supports_streaming": "true",
+		"caption":            caption,
+	})
+}
+
+type tgUpload struct {
+	Name string
+	Data []byte
+}
+
+// sendMediaGroup — альбом фото (2–10). Подпись — у первого.
+func (a *tgAPI) sendMediaGroup(ctx context.Context, chatID int64, photos []tgUpload, caption string) error {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	media := make([]map[string]string, len(photos))
+	for i, p := range photos {
+		field := fmt.Sprintf("p%d", i)
+		media[i] = map[string]string{"type": "photo", "media": "attach://" + field}
+		fw, err := mw.CreateFormFile(field, p.Name)
+		if err != nil {
+			return err
+		}
+		if _, err := fw.Write(p.Data); err != nil {
+			return err
+		}
+	}
+	if caption != "" {
+		media[0]["caption"] = caption
+	}
+	raw, _ := json.Marshal(media)
+	_ = mw.WriteField("chat_id", fmt.Sprint(chatID))
+	_ = mw.WriteField("media", string(raw))
+	if err := mw.Close(); err != nil {
+		return err
+	}
+	endpoint := fmt.Sprintf("%s/bot%s/sendMediaGroup", tgAPIBase, a.token)
+	for attempt := 0; attempt < 3; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		retry, err := a.do(ctx, a.files, req, "sendMediaGroup", nil)
+		if !retry {
+			return err
+		}
+	}
+	return errors.New("sendMediaGroup: не удалось после повторов")
 }
 
 func (a *tgAPI) sendDocument(ctx context.Context, chatID int64, name string, data []byte, caption string) error {

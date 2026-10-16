@@ -185,6 +185,20 @@ func (w *workspace) read(p string, from int) (string, error) {
 }
 
 func (w *workspace) write(p, content string, appendMode bool) (string, error) {
+	p, err := w.save(p, []byte(content), appendMode)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Записала %s (%s).", p, humanSize(int64(len(content)))), nil
+}
+
+// writeBytes — двоичный файл (картинка, видео): папки создаются сами.
+func (w *workspace) writeBytes(p string, data []byte) error {
+	_, err := w.save(p, data, false)
+	return err
+}
+
+func (w *workspace) save(p string, data []byte, appendMode bool) (string, error) {
 	p, err := w.rel(p)
 	if err != nil {
 		return "", err
@@ -206,7 +220,7 @@ func (w *workspace) write(p, content string, appendMode bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := f.WriteString(content); err != nil {
+	if _, err := f.Write(data); err != nil {
 		f.Close()
 		return "", err
 	}
@@ -214,7 +228,7 @@ func (w *workspace) write(p, content string, appendMode bool) (string, error) {
 		return "", err
 	}
 	w.chown(p)
-	return fmt.Sprintf("Записала %s (%s).", p, humanSize(int64(len(content)))), nil
+	return p, nil
 }
 
 func (w *workspace) readAll(p string, limit int64) (name string, data []byte, err error) {

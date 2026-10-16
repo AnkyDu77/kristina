@@ -126,6 +126,7 @@ func (b *bot) buildTools() {
 			},
 		},
 	}
+	tools = append(tools, b.skillTools()...)
 	tools = append(tools, b.taskTools()...)
 	tools = append(tools, b.monitorTools()...)
 	tools = append(tools, b.gpuTools()...)

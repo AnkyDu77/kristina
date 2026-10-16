@@ -24,7 +24,7 @@ type planStep struct {
 // остальные — из того же хода модели, ещё не выполненные.
 type pendingCall struct {
 	Calls    []toolCall `json:"calls"`
-	Kind     string     `json:"kind"` // input | approval | checkin (раунды позади — продолжать?)
+	Kind     string     `json:"kind"` // input | approval | checkin (раунды позади — продолжать?) | hf_wait (ждём Higgsfield)
 	ActionID int64      `json:"action_id,omitempty"`
 	Summary  string     `json:"summary,omitempty"`
 	Question string     `json:"question,omitempty"`

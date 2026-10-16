@@ -78,3 +78,40 @@ func TestLiveSandbox(t *testing.T) {
 		t.Errorf("потолок времени: код %d за %s", code, time.Since(start))
 	}
 }
+
+// TestLiveHiggsfield — только бесплатное: смета, параметры модели, баланс.
+// Нужен залогиненный CLI (higgsfield auth login) в PATH.
+func TestLiveHiggsfield(t *testing.T) {
+	h := higgsfieldFromEnv()
+	if h == nil {
+		t.Skip("нет CLI higgsfield")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	credits, plan, err := h.balance(ctx)
+	if err != nil {
+		t.Fatalf("balance: %v", err)
+	}
+	t.Logf("баланс %s кр, тариф %s", fmtCr(credits), plan)
+	r := hfRequest{Model: hfSoulModel, Prompt: "test", Params: map[string]string{"aspect_ratio": "3:4"}}
+	h.soulID = "2a978ec2-087e-4a81-bbdc-8f1d5fb46847"
+	h.prepare(&r)
+	c, err := h.cost(ctx, r)
+	if err != nil {
+		t.Fatalf("cost: %v", err)
+	}
+	t.Logf("смета Soul: %s кр", fmtCr(c))
+	if c <= 0 {
+		t.Fatalf("смета %v", c)
+	}
+	info, err := h.modelInfo(ctx, "kling_o3_flf")
+	if err != nil || !strings.Contains(info, "start_image") {
+		t.Fatalf("model info: %v %q", err, truncRunes(info, 300))
+	}
+	if _, err := h.modelInfo(ctx, "no_such_model_x"); err == nil {
+		t.Fatal("несуществующая модель должна дать ошибку")
+	}
+	if _, err := h.get(ctx, "16c1843b-4516-488f-aff8-0095a0c7c324"); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+}

@@ -20,6 +20,9 @@ services:
     volumes:
       # голос, база и рабочая папка (data/workspace) переживают пересоздание контейнера
       - ./data:/app/kristina-bot/data
+      # вход в Higgsfield: credentials.json с refresh-токеном. CLI обновляет
+      # токен сам и пишет файл обратно — поэтому rw
+      - ./data/higgsfield:/root/.config/higgsfield
       # бот поднимает песочницу Кристины. Сокет — это root на хосте, но
       # он у бота, а не у модели: та может только «выполни в песочнице»
       - /var/run/docker.sock:/var/run/docker.sock

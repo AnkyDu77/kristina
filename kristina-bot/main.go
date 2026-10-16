@@ -158,6 +158,9 @@ func main() {
 		log.Fatal(err)
 	}
 	b.attach(ws, sandboxFromEnv(ws.dir, cfg.sandboxNetwork), servers)
+	if h := higgsfieldFromEnv(); h != nil {
+		b.attachHiggsfield(h)
+	}
 
 	if err := b.run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatal(err)
@@ -267,6 +270,35 @@ func sandboxFromEnv(wsDir, network string) sandbox {
 	return &dockerSandbox{bin: bin, image: image, hostDir: hostDir, network: network, installNet: installNet,
 		memory: envStr("KRISTINA_SANDBOX_MEMORY", "1g"), swap: os.Getenv("KRISTINA_SANDBOX_MEMORY_SWAP"),
 		cpus: envStr("KRISTINA_SANDBOX_CPUS", "1")}
+}
+
+func envFloat(k string, def float64) float64 {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		log.Fatalf("%s: не число: %q", k, v)
+	}
+	return f
+}
+
+// higgsfieldFromEnv — генерации, если есть CLI Higgsfield. Ищем по имени
+// higgsfield, а не hf: под hf на машинах часто живёт CLI Hugging Face.
+func higgsfieldFromEnv() *higgsfield {
+	p, err := exec.LookPath(envStr("KRISTINA_HF_BIN", "higgsfield"))
+	if err != nil {
+		log.Printf("higgsfield: CLI не найден (%v) — генерации фото и видео выключены", err)
+		return nil
+	}
+	h := newHiggsfield(hfCLI{bin: p}, os.Getenv("KRISTINA_HF_SOUL_ID"),
+		envFloat("KRISTINA_HF_MONTHLY_LIMIT", 60), envFloat("KRISTINA_HF_MAX_CALL", 40), envInt("KRISTINA_HF_CONCURRENCY", 4))
+	if h.soulID == "" {
+		log.Printf("higgsfield: KRISTINA_HF_SOUL_ID пуст — Soul будет рисовать не Кристину")
+	}
+	log.Printf("higgsfield: %s, лимит %s кр/мес, потолок вызова %s кр, задач сразу %d", p, fmtCr(h.limit), fmtCr(h.maxCall), h.slots)
+	return h
 }
 
 func envDuration(k string, def time.Duration) time.Duration {
