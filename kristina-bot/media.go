@@ -114,6 +114,11 @@ func (c *mediaClient) ensureAvatar(ctx context.Context, base, path string) (stri
 	if err != nil {
 		return "", fmt.Errorf("аватар: %w", err)
 	}
+	return c.ensureAvatarData(ctx, base, filepath.Base(path), data)
+}
+
+// ensureAvatarData — то же для уже прочитанного видео (сцена из workspace).
+func (c *mediaClient) ensureAvatarData(ctx context.Context, base, name string, data []byte) (string, error) {
 	sum := sha256.Sum256(data)
 	id := hex.EncodeToString(sum[:])[:16]
 
@@ -126,7 +131,7 @@ func (c *mediaClient) ensureAvatar(ctx context.Context, base, path string) (stri
 	}
 	_, _, err = c.postMultipart(ctx, base+"/lipsync/avatars", []part{
 		{field: "avatar_id", data: []byte(id)},
-		{field: "file", name: filepath.Base(path), data: data},
+		{field: "file", name: name, data: data},
 	})
 	return id, err
 }

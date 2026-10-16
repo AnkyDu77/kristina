@@ -161,7 +161,7 @@ func (b *bot) hfBudget(total float64, count int) error {
 		return fmt.Errorf("это %s кр — больше потолка одного вызова (%s кр). Уменьши разрешение, длительность или count, или попроси владельца поднять KRISTINA_HF_MAX_CALL",
 			fmtCr(total), fmtCr(h.maxCall))
 	}
-	spent := b.store.hfSpent(monthStart(b.hfNow()))
+	spent := b.store.hfSpent(monthStart(b.nowLocal()))
 	if h.limit > 0 && spent+total > h.limit {
 		return fmt.Errorf("лимит месяца: потрачено %s из %s кр, этот вызов — ещё %s. Дальше — только если владелец поднимет KRISTINA_HF_MONTHLY_LIMIT",
 			fmtCr(spent), fmtCr(h.limit), fmtCr(total))
@@ -188,7 +188,7 @@ func (b *bot) hfConfirm(_ int64, raw json.RawMessage) (string, error) {
 	if err := b.hfBudget(total, a.Count); err != nil {
 		return "", err
 	}
-	spent := b.store.hfSpent(monthStart(b.hfNow()))
+	spent := b.store.hfSpent(monthStart(b.nowLocal()))
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "🎨 Higgsfield: %s", req.Model)
 	if a.Count > 1 {
@@ -265,7 +265,7 @@ func (b *bot) hfGenerate(ctx context.Context, chatID int64, raw json.RawMessage)
 			name = fmt.Sprintf("%s_%d", base, i+1)
 		}
 		if name == "" {
-			name = fmt.Sprintf("hf/%s/%s_%s", b.hfNow().Format("2006-01-02"), req.Model, id[:8])
+			name = fmt.Sprintf("hf/%s/%s_%s", b.nowLocal().Format("2006-01-02"), req.Model, id[:8])
 		}
 		if _, err := b.store.addHFJob(&hfJob{JobID: id, ChatID: chatID, TaskID: taskID, Model: req.Model,
 			Prompt: req.Prompt, Name: name, Cost: one}); err != nil {
@@ -278,15 +278,6 @@ func (b *bot) hfGenerate(ctx context.Context, chatID int64, raw json.RawMessage)
 		next += " Чтобы посмотреть результат и продолжить — hf_wait."
 	}
 	return fmt.Sprintf("Поставила в Higgsfield (по %s кр):\n%s\n%s", fmtCr(one), strings.Join(made, "\n"), next), nil
-}
-
-// hfNow — «сейчас» в часовом поясе владельца: от него месяц лимита и
-// папки по датам.
-func (b *bot) hfNow() time.Time {
-	if b.cfg.tz != nil {
-		return time.Now().In(b.cfg.tz)
-	}
-	return time.Now()
 }
 
 func randUint32() uint32 {
@@ -622,7 +613,7 @@ func (b *bot) hfStatusText(ctx context.Context, chatID int64, withBalance bool) 
 			fmt.Fprintf(&sb, "Баланс узнать не вышло: %v\n", err)
 		}
 	}
-	spent := b.store.hfSpent(monthStart(b.hfNow()))
+	spent := b.store.hfSpent(monthStart(b.nowLocal()))
 	fmt.Fprintf(&sb, "Потрачено за месяц: %s кр", fmtCr(spent))
 	if b.hf.limit > 0 {
 		fmt.Fprintf(&sb, " из %s (лимит)", fmtCr(b.hf.limit))

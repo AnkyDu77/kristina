@@ -151,12 +151,16 @@ func (b *bot) attach(ws *workspace, sb sandbox, servers []*mcpServer) {
 	b.registerTools(b.fileTools())
 	b.registerTools(b.computerTools())
 	b.registerTools(b.photoTools())
+	b.registerTools(b.sceneTools())
 }
 
 // attachHiggsfield включает генерации фото и видео (higgsfield.go).
 func (b *bot) attachHiggsfield(h *higgsfield) {
 	b.hf = h
 	b.registerTools(b.hfTools())
+	if b.ws != nil {
+		b.registerTools([]*tool{b.sceneMakeTool()})
+	}
 }
 
 func (b *bot) run(ctx context.Context) error {
@@ -733,11 +737,21 @@ func (b *bot) circleFor(ctx context.Context, chatID int64, answer string) error 
 }
 
 func (b *bot) circle(ctx context.Context, base, speech string, voice voiceRef) ([]byte, error) {
+	// Сцена текущего слота суток (scenes.go) или запасной аватар
+	name, data, _, err := b.circleAvatar(b.nowLocal())
+	if err != nil {
+		return nil, err
+	}
+	return b.circleOn(ctx, base, speech, voice, name, data)
+}
+
+// circleOn — кружок на заданном видео-аватаре.
+func (b *bot) circleOn(ctx context.Context, base, speech string, voice voiceRef, avatarName string, avatar []byte) ([]byte, error) {
 	wav, err := b.media.speak(ctx, base, speech, b.cfg.language, voice)
 	if err != nil {
 		return nil, fmt.Errorf("TTS: %w", err)
 	}
-	avatarID, err := b.media.ensureAvatar(ctx, base, b.cfg.avatarPath)
+	avatarID, err := b.media.ensureAvatarData(ctx, base, avatarName, avatar)
 	if err != nil {
 		return nil, fmt.Errorf("аватар: %w", err)
 	}
@@ -946,7 +960,11 @@ func (b *bot) statusText(chatID int64, cs *chatState) string {
 	} else {
 		sb.WriteString("Голос: есть\n")
 	}
-	fmt.Fprintf(&sb, "Аватар: %s\n", filepath.Base(b.cfg.avatarPath))
+	if _, _, label, err := b.circleAvatar(b.nowLocal()); err == nil {
+		fmt.Fprintf(&sb, "Кружок сейчас: %s\n", label)
+	} else {
+		fmt.Fprintf(&sb, "Аватар: %s (%v)\n", filepath.Base(b.cfg.avatarPath), err)
+	}
 	if cs.noCircl {
 		sb.WriteString("Кружки: выключены")
 	} else {

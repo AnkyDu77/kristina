@@ -688,7 +688,10 @@ resource "null_resource" "provision" {
     user        = "root"
     private_key = file(pathexpand(var.ssh_private_key_path))
     host        = openstack_networking_floatingip_v2.floatingip.address
-    timeout     = "5m" # SSH-ретраи заменяют фиксированный time_sleep
+    # SSH-ретраи заменяют фиксированный time_sleep. 5 минут не хватало:
+    # обычная (не прерываемая) машина с переиспользованным диском
+    # грузилась дольше, и провижининг падал с «no route to host» на живой ВМ
+    timeout = "12m"
   }
 
   provisioner "remote-exec" {

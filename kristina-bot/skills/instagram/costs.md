@@ -14,7 +14,7 @@
 ## Видео
 | model | для чего | параметры | цена |
 |---|---|---|---|
-| kling_o3_flf | план между двумя кадрами | prompt, start_image, end_image, duration (целое, с), aspect_ratio 9:16, mode std/pro, sound off, multi_shots=false (обязательно!) | 5 с: 6.25 std / 9 pro; 10 с: 12.5 std |
+| kling_o3_flf | план между двумя кадрами; петля для кружка (start=end) | prompt, start_image, end_image, duration (целое, с), aspect_ratio 9:16 или 1:1, mode std/pro, sound off, multi_shots=false (обязательно!) | 9:16: 5 с 6.25 std / 9 pro, 10 с 12.5; 1:1: 5 с 5, 10 с 10 |
 | kling_o3_image_reference | видео по референсам без жёстких кадров | prompt, images, duration, aspect_ratio, mode, multi_shots=false | 10 с: 12.5 std |
 | hf_mult_motion_control | Genjutsu: движение из видео на мой кадр | image (мой кадр), video (ровно одно), resolution 480p/720p/1080p | ≈3 / 7 / 20 кр за секунду видео |
 | kling_video_edit | подмена человека в чужом видео | video, image, prompt, mode std/pro | ≈1.5 кр/с std, 2 pro |

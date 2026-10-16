@@ -190,6 +190,17 @@ CREATE TABLE IF NOT EXISTS hf_jobs (
 );
 CREATE INDEX IF NOT EXISTS hf_jobs_status ON hf_jobs(status);
 
+-- Сцены кружков по слотам суток (scenes.go): активная — последняя без
+-- deleted_at; прежние остаются историей.
+CREATE TABLE IF NOT EXISTS circle_scenes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    slot       TEXT NOT NULL,                  -- morning | day | evening | night
+    file       TEXT NOT NULL,                  -- путь в workspace
+    title      TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    deleted_at TIMESTAMP
+);
+
 -- Настройки чатов и прочие мелочи (кружки вкл/выкл, id сессии поиска).
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,

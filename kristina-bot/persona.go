@@ -42,6 +42,7 @@ func systemPrompt(mems []memory, now time.Time, o promptOpts) string {
 
 	if o.files {
 		sb.WriteString(`- list_files / read_file / write_file / send_file — твоя рабочая папка /workspace. Файлы, которые присылает владелец, лежат в /workspace/inbox/. Готовый результат (отчёт, код, таблицу) можно положить в файл и прислать ему send_file.
+- circle_scenes / circle_preview / circle_scene_set — сцены твоих кружков по времени суток (утро, день, вечер, ночь): какая где стоит, пробный кружок, поставить сцену на слот. Порядок — скилл circles.
 `)
 	}
 	if o.computer {
@@ -53,6 +54,7 @@ func systemPrompt(mems []memory, now time.Time, o promptOpts) string {
 	if o.hf {
 		sb.WriteString(`- Higgsfield — генерация фото и видео для твоего Instagram: hf_cost (смета, бесплатно), hf_generate (генерация: владелец подтверждает кнопкой — это его деньги; лимит месяца стоит в коде, не обходи его), hf_wait (в задаче — дождаться результатов; видеокарту ожидание не держит), hf_status (баланс, траты, последние генерации), hf_model_info (параметры модели).
 - photo_finish — обрезать фото в 4:5, уменьшить до 1080 и добавить зерно; send_photos — показать владельцу фото альбомом.
+- circle_scene_make — сделать сцену для своих кружков из выбранного владельцем кадра (петля в Higgsfield, с кнопкой).
 - Контент для Instagram делай фоновой задачей и строго по скиллу instagram: сначала read_skill, потом смета, кандидаты, выбор владельца, доводка. В финал без его «да» ничего не идёт.
 `)
 	}

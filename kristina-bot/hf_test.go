@@ -292,7 +292,7 @@ func TestFinishPhoto(t *testing.T) {
 
 func TestSkills(t *testing.T) {
 	idx := skillsIndex()
-	for _, name := range []string{"instagram —", "instagram/photos —", "instagram/reels —", "instagram/costs —"} {
+	for _, name := range []string{"circles —", "instagram —", "instagram/photos —", "instagram/reels —", "instagram/costs —"} {
 		if !strings.Contains(idx, name) {
 			t.Errorf("в оглавлении нет %q:\n%s", name, idx)
 		}
